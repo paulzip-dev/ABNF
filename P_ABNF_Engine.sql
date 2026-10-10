@@ -1,13 +1,32 @@
 create or replace package P_ABNF_Engine is
 
+------------------------------------------------------------------------------
+-- RFC 5234 Appendix B core rules
+------------------------------------------------------------------------------
 function CoreAlpha return TY_ABNF_Alternative;
-function CoreDigit return TY_ABNF_Range;
-function CoreHexDig return TY_ABNF_Alternative;
 function CoreBit return TY_ABNF_Alternative;
+function CoreChar return TY_ABNF_Range;
+function CoreCr return TY_ABNF_Literal;
+function CoreCrlf return TY_ABNF_Literal;
+function CoreCtl return TY_ABNF_Alternative;
+function CoreDigit return TY_ABNF_Range;
+function CoreDquote return TY_ABNF_Literal;
+function CoreHexDig return TY_ABNF_Alternative;
+function CoreHtab return TY_ABNF_Literal;
+function CoreLf return TY_ABNF_Literal;
+function CoreLwsp return TY_ABNF_Repetition;
+function CoreOctet return TY_ABNF_Range;
+function CoreSp return TY_ABNF_Literal;
 function CoreVchar return TY_ABNF_Range;
 function CoreWsp return TY_ABNF_Alternative;
-function CoreCrlf return TY_ABNF_Literal;
 
+-- All core rules as a rule set. They are always available to TY_ABNF_RuleRef nodes.
+function CoreRules return TY_ABNF_RuleSet;
+
+------------------------------------------------------------------------------
+-- Validation. A node tree (or rule set + start rule) either matches the whole
+-- input or it does not. Matching is full ABNF: every alternative is explored.
+------------------------------------------------------------------------------
 function ValidateInput(
            pNode  TY_ABNF_Node
          , pInput varchar2
@@ -22,12 +41,142 @@ procedure ValidateInput(
           , pErrorMessage     out varchar2
           );
 
+-- pStartRule null means the first rule in pRules
+function ValidateInput(
+           pRules     TY_ABNF_RuleSet
+         , pStartRule varchar2
+         , pInput     varchar2
+         ) return boolean;
+
+procedure ValidateInput(
+            pRules            in  TY_ABNF_RuleSet
+          , pStartRule        in  varchar2
+          , pInput            in  varchar2
+          , pIsValid          out boolean
+          , pErrorPosition    out integer
+          , pFailedNodeName   out varchar2
+          , pErrorMessage     out varchar2
+          );
+
+------------------------------------------------------------------------------
+-- Explain why input does not match. The function forms return null when the
+-- input is valid, otherwise a message such as:
+--   Line 1, column 6: found "@", expected one of: ALPHA, DIGIT, "." (while matching rule: local-part)
+-- The procedure forms return the details separately.
+------------------------------------------------------------------------------
+function ExplainMismatch(
+           pNode  TY_ABNF_Node
+         , pInput varchar2
+         ) return varchar2;
+
+function ExplainMismatch(
+           pRules     TY_ABNF_RuleSet
+         , pStartRule varchar2
+         , pInput     varchar2
+         ) return varchar2;
+
+procedure ExplainMismatch(
+            pNode      in  TY_ABNF_Node
+          , pInput     in  varchar2
+          , pIsValid   out boolean
+          , pPosition  out integer
+          , pLine      out integer
+          , pColumn    out integer
+          , pFound     out varchar2
+          , pExpected  out TY_ABNF_StrList
+          , pMessage   out varchar2
+          );
+
+procedure ExplainMismatch(
+            pRules     in  TY_ABNF_RuleSet
+          , pStartRule in  varchar2
+          , pInput     in  varchar2
+          , pIsValid   out boolean
+          , pPosition  out integer
+          , pLine      out integer
+          , pColumn    out integer
+          , pFound     out varchar2
+          , pExpected  out TY_ABNF_StrList
+          , pMessage   out varchar2
+          );
+
+------------------------------------------------------------------------------
+-- Grammar handling
+------------------------------------------------------------------------------
+-- Parses ABNF text (RFC 5234 + RFC 7405) into a rule set. Comments are kept in
+-- TY_ABNF_Rule.COMMENT_TEXT. Raises ORA-20110 with line/column on a syntax error.
+function ParseGrammar(pGrammar varchar2) return TY_ABNF_RuleSet;
+
+-- Generates PL/SQL source of a function GetRuleSet return TY_ABNF_RuleSet which rebuilds the grammar
 function GeneratePLSQLFromABNF(pGrammar varchar2) return clob;
+
+------------------------------------------------------------------------------
+-- Tokenising. Splits pInput into consecutive tokens, each a match of one of the
+-- rules named in pTokenRules (comma separated; null = every rule in the grammar).
+-- At each position the longest match wins; a tie goes to the rule listed first.
+-- Rules that can match nothing (zero length) never produce a token.
+-- Raises ORA-20120 (with line/column and the rules tried) if no rule matches somewhere.
+--
+--   select * from table(P_ABNF_Engine.Tokenise(
+--     'int = 1*DIGIT  op = "+" / "-"  ws = 1*SP', 'int,op,ws', '12 + 3'))
+------------------------------------------------------------------------------
+function Tokenise(
+           pRules       TY_ABNF_RuleSet
+         , pTokenRules  varchar2
+         , pInput       varchar2
+         ) return TY_ABNF_TokenList pipelined;
+
+-- Same, from ABNF text
+function Tokenise(
+           pGrammar     varchar2
+         , pTokenRules  varchar2
+         , pInput       varchar2
+         ) return TY_ABNF_TokenList pipelined;
+
+------------------------------------------------------------------------------
+-- Parse tree. Matches the whole of pInput against pStartRule (null = first rule) and returns one row for
+-- every match of a rule defined in the grammar, parents before children, so structure is available:
+--
+--   select t.NODE_ID, t.PARENT_ID, t.DEPTH, t.RULE_NAME, t.START_POS, t.NODE_LENGTH, t.TEXT
+--   from table(P_ABNF_Engine.ParseTree('file = 1*(1*ALPHA [","])', 'file', 'ab,c')) t order by t.NODE_ID
+--
+-- Unlike Tokenise, rules that matched nothing appear (NODE_LENGTH 0), so an empty CSV field is a row. The
+-- core rules (DIGIT, ALPHA ...) are not listed unless the grammar defines them itself. If the grammar can
+-- match the input in more than one way, the way that tries longer matches first is returned.
+-- Raises ORA-20121, with the ExplainMismatch message, if the input does not match.
+------------------------------------------------------------------------------
+function ParseTree(
+           pRules       TY_ABNF_RuleSet
+         , pStartRule   varchar2
+         , pInput       varchar2
+         ) return TY_ABNF_ParseNodeList pipelined;
+
+-- Same, from ABNF text
+function ParseTree(
+           pGrammar     varchar2
+         , pStartRule   varchar2
+         , pInput       varchar2
+         ) return TY_ABNF_ParseNodeList pipelined;
 
 end P_ABNF_Engine;
 /
 
 create or replace package body P_ABNF_Engine is
+
+LF constant varchar2(1) := chr(10);
+
+-- State of the grammar parser
+type TParser is record (
+  Str      varchar2(32767)
+, Pos      integer
+, Len      integer
+, Cmt      varchar2(4000)  -- comments belonging to the rule being parsed
+, Tail     varchar2(4000)  -- comments on their own line(s) not yet attached to a rule
+, LineTok  boolean         -- a token has been read on the current line
+, LineUsed boolean         -- the current line holds a token or a comment (i.e. is not blank)
+, LineStart integer        -- position of the first character of the current line
+, RuleIndent integer       -- how far the name of the rule being parsed is indented
+);
 
 ------------------------------------------------------------------------------
 -- ALPHA = %x41-5A / %x61-7A (A-Z / a-z)
@@ -46,6 +195,68 @@ begin
 end CoreAlpha;
 
 ------------------------------------------------------------------------------
+-- BIT = "0" / "1"
+------------------------------------------------------------------------------
+function CoreBit return TY_ABNF_Alternative is
+  vResult TY_ABNF_Alternative;
+begin
+  vResult := TY_ABNF_Alternative(
+               NODE_NAME   => 'BIT'
+             , CHILD_NODES => TY_ABNF_NodeList(
+                                TY_ABNF_Literal(NODE_NAME => 'BIT_0', VALUE => '0')
+                              , TY_ABNF_Literal(NODE_NAME => 'BIT_1', VALUE => '1')
+                              )
+             );
+  return vResult;
+end CoreBit;
+
+------------------------------------------------------------------------------
+-- CHAR = %x01-7F (any 7-bit US-ASCII character, excluding NUL)
+------------------------------------------------------------------------------
+function CoreChar return TY_ABNF_Range is
+begin
+  return TY_ABNF_Range(NODE_NAME => 'CHAR', MIN_CODE => 1, MAX_CODE => 127);
+end CoreChar;
+
+------------------------------------------------------------------------------
+-- CR = %x0D
+------------------------------------------------------------------------------
+function CoreCr return TY_ABNF_Literal is
+begin
+  return TY_ABNF_Literal(NODE_NAME => 'CR', VALUE => chr(13), CASE_SENSITIVE => 'Y');
+end CoreCr;
+
+------------------------------------------------------------------------------
+-- CRLF = CR LF (%x0D.0A)
+------------------------------------------------------------------------------
+function CoreCrlf return TY_ABNF_Literal is
+  vResult TY_ABNF_Literal;
+begin
+  vResult := TY_ABNF_Literal(
+               NODE_NAME      => 'CRLF'
+             , VALUE          => chr(13) || chr(10)
+             , CASE_SENSITIVE => 'Y'
+             );
+  return vResult;
+end CoreCrlf;
+
+------------------------------------------------------------------------------
+-- CTL = %x00-1F / %x7F
+------------------------------------------------------------------------------
+function CoreCtl return TY_ABNF_Alternative is
+  vResult TY_ABNF_Alternative;
+begin
+  vResult := TY_ABNF_Alternative(
+               NODE_NAME   => 'CTL'
+             , CHILD_NODES => TY_ABNF_NodeList(
+                                TY_ABNF_Range(NODE_NAME => 'CTL_LOW', MIN_CODE => 0, MAX_CODE => 31)
+                              , TY_ABNF_Range(NODE_NAME => 'CTL_DEL', MIN_CODE => 127, MAX_CODE => 127)
+                              )
+             );
+  return vResult;
+end CoreCtl;
+
+------------------------------------------------------------------------------
 -- DIGIT = %x30-39 (0-9)
 ------------------------------------------------------------------------------
 function CoreDigit return TY_ABNF_Range is
@@ -58,6 +269,14 @@ begin
              );
   return vResult;
 end CoreDigit;
+
+------------------------------------------------------------------------------
+-- DQUOTE = %x22 (")
+------------------------------------------------------------------------------
+function CoreDquote return TY_ABNF_Literal is
+begin
+  return TY_ABNF_Literal(NODE_NAME => 'DQUOTE', VALUE => '"', CASE_SENSITIVE => 'Y');
+end CoreDquote;
 
 ------------------------------------------------------------------------------
 -- HEXDIG = DIGIT / "A" / "B" / "C" / "D" / "E" / "F" (case-insensitive)
@@ -77,20 +296,60 @@ begin
 end CoreHexDig;
 
 ------------------------------------------------------------------------------
--- BIT = "0" / "1"
+-- HTAB = %x09
 ------------------------------------------------------------------------------
-function CoreBit return TY_ABNF_Alternative is
-  vResult TY_ABNF_Alternative;
+function CoreHtab return TY_ABNF_Literal is
 begin
-  vResult := TY_ABNF_Alternative(
-               NODE_NAME   => 'BIT'
-             , CHILD_NODES => TY_ABNF_NodeList(
-                                TY_ABNF_Literal(NODE_NAME => 'BIT_0', VALUE => '0')
-                              , TY_ABNF_Literal(NODE_NAME => 'BIT_1', VALUE => '1')
-                              )
+  return TY_ABNF_Literal(NODE_NAME => 'HTAB', VALUE => chr(9), CASE_SENSITIVE => 'Y');
+end CoreHtab;
+
+------------------------------------------------------------------------------
+-- LF = %x0A
+------------------------------------------------------------------------------
+function CoreLf return TY_ABNF_Literal is
+begin
+  return TY_ABNF_Literal(NODE_NAME => 'LF', VALUE => chr(10), CASE_SENSITIVE => 'Y');
+end CoreLf;
+
+------------------------------------------------------------------------------
+-- LWSP = *(WSP / CRLF WSP) (linear white space: newlines must be followed by white space)
+------------------------------------------------------------------------------
+function CoreLwsp return TY_ABNF_Repetition is
+  vResult TY_ABNF_Repetition;
+begin
+  vResult := TY_ABNF_Repetition(
+               NODE_NAME  => 'LWSP'
+             , MIN_OCCURS => 0
+             , MAX_OCCURS => null
+             , CHILD_NODE => TY_ABNF_Alternative(
+                               NODE_NAME   => null
+                             , CHILD_NODES => TY_ABNF_NodeList(
+                                                CoreWsp()
+                                              , TY_ABNF_Sequence(
+                                                  NODE_NAME   => null
+                                                , CHILD_NODES => TY_ABNF_NodeList(CoreCrlf(), CoreWsp())
+                                                )
+                                              )
+                             )
              );
   return vResult;
-end CoreBit;
+end CoreLwsp;
+
+------------------------------------------------------------------------------
+-- OCTET = %x00-FF
+------------------------------------------------------------------------------
+function CoreOctet return TY_ABNF_Range is
+begin
+  return TY_ABNF_Range(NODE_NAME => 'OCTET', MIN_CODE => 0, MAX_CODE => 255);
+end CoreOctet;
+
+------------------------------------------------------------------------------
+-- SP = %x20
+------------------------------------------------------------------------------
+function CoreSp return TY_ABNF_Literal is
+begin
+  return TY_ABNF_Literal(NODE_NAME => 'SP', VALUE => ' ', CASE_SENSITIVE => 'Y');
+end CoreSp;
 
 ------------------------------------------------------------------------------
 -- VCHAR = %x21-7E (Visible ASCII characters)
@@ -114,872 +373,1424 @@ function CoreWsp return TY_ABNF_Alternative is
 begin
   vResult := TY_ABNF_Alternative(
                NODE_NAME   => 'WSP'
-             , CHILD_NODES => TY_ABNF_NodeList(
-                                TY_ABNF_Literal(NODE_NAME => 'SP',   VALUE => ' ')
-                              , TY_ABNF_Literal(NODE_NAME => 'HTAB', VALUE => chr(9))
-                              )
+             , CHILD_NODES => TY_ABNF_NodeList(CoreSp(), CoreHtab())
              );
   return vResult;
 end CoreWsp;
 
-------------------------------------------------------------------------------
--- CRLF = %x0D.0A
-------------------------------------------------------------------------------
-function CoreCrlf return TY_ABNF_Literal is
-  vResult TY_ABNF_Literal;
+function CoreRules return TY_ABNF_RuleSet is
+  vResult TY_ABNF_RuleSet := TY_ABNF_RuleSet();
+
+  procedure Add(pName varchar2, pNode TY_ABNF_Node) is
+  begin
+    vResult.extend;
+    vResult(vResult.count) := TY_ABNF_Rule(pName, 'RFC 5234 core rule', pNode);
+  end Add;
 begin
-  vResult := TY_ABNF_Literal(
-               NODE_NAME => 'CRLF'
-             , VALUE     => chr(13) || chr(10)
-             );
+  Add('ALPHA',  CoreAlpha());
+  Add('BIT',    CoreBit());
+  Add('CHAR',   CoreChar());
+  Add('CR',     CoreCr());
+  Add('CRLF',   CoreCrlf());
+  Add('CTL',    CoreCtl());
+  Add('DIGIT',  CoreDigit());
+  Add('DQUOTE', CoreDquote());
+  Add('HEXDIG', CoreHexDig());
+  Add('HTAB',   CoreHtab());
+  Add('LF',     CoreLf());
+  Add('LWSP',   CoreLwsp());
+  Add('OCTET',  CoreOctet());
+  Add('SP',     CoreSp());
+  Add('VCHAR',  CoreVchar());
+  Add('WSP',    CoreWsp());
   return vResult;
-end CoreCrlf;
-
---function ParseNode(
---             pNode     in     TY_ABNF_Node
---           , pInput    in     varchar2
---           , pOffset   in     integer
---           , pFailPos  in out integer
---           , pFailNode in out varchar2
---           ) return integer is
---    vCurrPos   integer := pOffset;
---    vMatchLen  integer := 0;
---    vSubLen    integer := 0;
---    vCount     integer := 0;
---    vResult    integer := 0;
---  begin
---    if pNode is null or pOffset > length(pInput) + 1 then
---      vResult := 0;
---    elsif pNode is of (TY_ABNF_Literal) then
---      --------------------------------------------------------------------------
---      -- 1. Literal Matching
---      --------------------------------------------------------------------------
---      declare
---        vLit    TY_ABNF_Literal := treat(pNode as TY_ABNF_Literal);
---        vLitVal varchar2(32767);
---      begin
---        vLitVal   := vLit.VALUE;
---        vMatchLen := length(vLitVal);
---
---        if substr(pInput, pOffset, vMatchLen) = vLitVal then
---          vResult := vMatchLen;
---        else
---          if pOffset > pFailPos then
---            pFailPos  := pOffset;
---            pFailNode := nvl(vLit.NODE_NAME, 'LITERAL');
---          end if;
---          vResult := 0;
---        end if;
---      end;
---
---    elsif pNode is of (TY_ABNF_Range) then
---      --------------------------------------------------------------------------
---      -- 2. ASCII Character Range Matching
---      --------------------------------------------------------------------------
---      declare
---        vRng     TY_ABNF_Range := treat(pNode as TY_ABNF_Range);
---        vCode    integer;
---        vMinCode integer;
---        vMaxCode integer;
---      begin
---        vMinCode := vRng.MIN_CODE;
---        vMaxCode := vRng.MAX_CODE;
---
---        if pOffset <= length(pInput) then
---          vCode := ascii(substr(pInput, pOffset, 1));
---          if vCode >= vMinCode and vCode <= vMaxCode then
---            vResult := 1;
---          else
---            if pOffset > pFailPos then
---              pFailPos  := pOffset;
---              pFailNode := nvl(vRng.NODE_NAME, 'RANGE');
---            end if;
---            vResult := 0;
---          end if;
---        else
---          if pOffset > pFailPos then
---            pFailPos  := pOffset;
---            pFailNode := nvl(vRng.NODE_NAME, 'RANGE');
---          end if;
---          vResult := 0;
---        end if;
---      end;
---
---    elsif pNode is of (TY_ABNF_Sequence) then
---      --------------------------------------------------------------------------
---      -- 3. Sequence (Ordered CONCATENATION of Child Nodes)
---      --------------------------------------------------------------------------
---      declare
---        vSeq  TY_ABNF_Sequence := treat(pNode as TY_ABNF_Sequence);
---        vExit boolean := False;
---      begin
---        if vSeq.CHILD_NODES is not null then
---          for i in 1 .. vSeq.CHILD_NODES.count loop
---            if not vExit then
---              vSubLen := ParseNode(
---                           pNode     => vSeq.CHILD_NODES(i)
---                         , pInput    => pInput
---                         , pOffset   => vCurrPos
---                         , pFailPos  => pFailPos
---                         , pFailNode => pFailNode
---                         );
---
---              if vSubLen = 0 and vSeq.CHILD_NODES(i) is not null then
---                vMatchLen := 0;
---                vExit     := True;
---              else
---                vCurrPos  := vCurrPos + vSubLen;
---                vMatchLen := vMatchLen + vSubLen;
---              end if;
---            end if;
---          end loop;
---        end if;
---        vResult := vMatchLen;
---      end;
---
---    elsif pNode is of (TY_ABNF_Alternative) then
---      --------------------------------------------------------------------------
---      -- 4. Alternative (FIRST MATCHing Child Node)
---      --------------------------------------------------------------------------
---      declare
---        vAlt     TY_ABNF_Alternative := treat(pNode as TY_ABNF_Alternative);
---        vMatched boolean := False;
---      begin
---        if vAlt.CHILD_NODES is not null then
---          for i in 1 .. vAlt.CHILD_NODES.count loop
---            if not vMatched then
---              vSubLen := ParseNode(
---                           pNode     => vAlt.CHILD_NODES(i)
---                         , pInput    => pInput
---                         , pOffset   => pOffset
---                         , pFailPos  => pFailPos
---                         , pFailNode => pFailNode
---                         );
---
---              if vSubLen > 0 then
---                vMatchLen := vSubLen;
---                vMatched  := True;
---              end if;
---            end if;
---          end loop;
---        end if;
---
---        if vMatched then
---          vResult := vMatchLen;
---        else
---          if pOffset > pFailPos then
---            pFailPos  := pOffset;
---            pFailNode := nvl(vAlt.NODE_NAME, 'ALT');
---          end if;
---          vResult := 0;
---        end if;
---      end;
---
---    elsif pNode is of (TY_ABNF_Repetition) then
---      --------------------------------------------------------------------------
---      -- 5. Repetition (MIN_OCCURS to MAX_OCCURS repeats)
---      --------------------------------------------------------------------------
---      declare
---        vRep  TY_ABNF_Repetition := treat(pNode as TY_ABNF_Repetition);
---        vLoop boolean := True;
---      begin
---        while vLoop loop
---          if vRep.MAX_OCCURS is not null and vCount >= vRep.MAX_OCCURS then
---            vLoop := False;
---          else
---            vSubLen := ParseNode(
---                         pNode     => vRep.CHILD_NODE
---                       , pInput    => pInput
---                       , pOffset   => vCurrPos
---                       , pFailPos  => pFailPos
---                       , pFailNode => pFailNode
---                       );
---
---            if vSubLen = 0 then
---              vLoop := False;
---            else
---              vCount    := vCount + 1;
---              vCurrPos  := vCurrPos + vSubLen;
---              vMatchLen := vMatchLen + vSubLen;
---            end if;
---          end if;
---        end loop;
---
---        if vCount >= vRep.MIN_OCCURS then
---          vResult := vMatchLen;
---        else
---          if pOffset > pFailPos then
---            pFailPos  := pOffset;
---            pFailNode := nvl(vRep.NODE_NAME, 'REPEAT');
---          end if;
---          vResult := 0;
---        end if;
---      end;
---    else
---      vResult := 0;
---    end if;
---
---    return vResult;
---  end ParseNode;
+end CoreRules;
 
 ------------------------------------------------------------------------------
--- ValidateInput (Function overload)
+-- Text position helpers
 ------------------------------------------------------------------------------
-function ValidateInput(
-           pNode  TY_ABNF_Node
-         , pInput varchar2
-         ) return boolean is
-  vIsValid        boolean := False;
-  vErrorPosition  integer;
-  vFailedNodeName varchar2(128);
-  vErrorMessage   varchar2(4000);
-begin
-  ValidateInput(
-    pNode           => pNode
-  , pInput          => pInput
-  , pIsValid        => vIsValid
-  , pErrorPosition  => vErrorPosition
-  , pFailedNodeName => vFailedNodeName
-  , pErrorMessage   => vErrorMessage
-  );
-
-  return vIsValid;
-end ValidateInput;
-
-------------------------------------------------------------------------------
--- ValidateInput (Procedure overload)
-------------------------------------------------------------------------------
-procedure ValidateInput(
-            pNode           in  TY_ABNF_Node
-          , pInput          in  varchar2
-          , pIsValid          out boolean
-          , pErrorPosition    out integer
-          , pFailedNodeName   out varchar2
-          , pErrorMessage     out varchar2
+procedure LineAndColumn(
+            pText   in  varchar2
+          , pPos    in  integer
+          , pLine   out integer
+          , pColumn out integer
           ) is
-  vMatchLength integer := 0;
-  vFailPos     integer := 0;
-  vFailNode    varchar2(128);
+  vBefore varchar2(32767) := substr(pText, 1, greatest(pPos - 1, 0));
+begin
+  pLine   := 1 + nvl(length(vBefore), 0) - nvl(length(replace(vBefore, LF)), 0);
+  pColumn := pPos - nvl(instr(vBefore, LF, -1), 0);
+end LineAndColumn;
+
+------------------------------------------------------------------------------
+-- Matching
+------------------------------------------------------------------------------
+-- Core rules go last so a grammar's own rules take precedence
+function WithCore(pRules TY_ABNF_RuleSet) return TY_ABNF_RuleSet is
+  vResult TY_ABNF_RuleSet := nvl(pRules, TY_ABNF_RuleSet());
+  vCore   TY_ABNF_RuleSet := CoreRules();
+begin
+  for i in 1..vCore.count
+  loop
+    vResult.extend;
+    vResult(vResult.count) := vCore(i);
+  end loop;
+  return vResult;
+end WithCore;
+
+function StartNode(pRules TY_ABNF_RuleSet, pStartRule varchar2) return TY_ABNF_Node is
+  vName   varchar2(128) := pStartRule;
+  vResult TY_ABNF_Node;
+begin
+  if vName is null and pRules is not null and pRules.count > 0 then
+    vName := pRules(1).RULE_NAME;
+  end if;
+  if vName is not null then
+    vResult := TY_ABNF_RuleRef(NODE_NAME => null, RULE_NAME => vName);
+  end if;
+  return vResult;
+end StartNode;
+
+function JoinExpected(pExpected TY_ABNF_StrList, pExtra varchar2 default null) return varchar2 is
+  vResult varchar2(32767);
+begin
+  for i in 1..least(pExpected.count, 10)
+  loop
+    vResult := vResult || case when i > 1 then ', ' end || pExpected(i);
+  end loop;
+  if pExpected.count > 10 then
+    vResult := vResult || ', ...';
+  end if;
+  if pExtra is not null then
+    vResult := vResult || case when vResult is not null then ', ' end || pExtra;
+  end if;
+  return substr(vResult, 1, 4000);
+end JoinExpected;
+
+-- Evaluates the whole input. pErrorPosition is the 1-based position of the problem (null when valid).
+procedure EvaluateInput(
+            pNode           in  TY_ABNF_Node
+          , pRules          in  TY_ABNF_RuleSet
+          , pInput          in  varchar2
+          , pIsValid        out boolean
+          , pErrorPosition  out integer
+          , pFailedNodeName out varchar2
+          , pExpected       out TY_ABNF_StrList
+          , pPath           out varchar2
+          , pTrailing       out boolean
+          ) is
+  vCtx     TY_ABNF_Context;
+  vEnds    TY_ABNF_PosList;
+  vLen     integer := nvl(length(pInput), 0);
+  vLongest integer := 0;
 begin
   pIsValid        := False;
   pErrorPosition  := 0;
   pFailedNodeName := null;
+  pExpected       := TY_ABNF_StrList();
+  pPath           := null;
+  pTrailing       := False;
 
-  if pNode is null then
-    pErrorMessage := 'Root rule node is null.';
-  elsif pInput is null then
-    pErrorMessage := 'Input string is null.';
-  else
-    vMatchLength := pNode.MatchInput(
-                      pInput    => pInput
-                    , pOffset   => 1
-                    , pFailPos  => vFailPos
-                    , pFailNode => vFailNode
-                    );
+  if pNode is not null then
+    vCtx  := TY_ABNF_RuleContext.NewContext(WithCore(pRules));
+    vEnds := pNode.MatchInput(pInput => pInput, pOffset => 1, pCtx => vCtx);
 
-    if vMatchLength = length(pInput) then
-      pIsValid        := True;
-      pErrorPosition  := null;
-      pFailedNodeName := null;
-      pErrorMessage   := null;
+    if (vLen + 1) member of vEnds then
+      pIsValid       := True;
+      pErrorPosition := null;
     else
-      pIsValid := False;
-      if vMatchLength >= 0 and vMatchLength < length(pInput) and (vFailPos is null or vFailPos <= vMatchLength) then
-        pErrorPosition  := vMatchLength + 1;
+      for i in 1..vEnds.count
+      loop
+        vLongest := greatest(vLongest, vEnds(i));
+      end loop;
+
+      if vLongest > 0 and vCtx.FAIL_POS <= vLongest then
+        -- The start of the input is a complete match, but more input follows it
+        pTrailing       := True;
+        pErrorPosition  := vLongest;
         pFailedNodeName := 'UNEXPECTED_TRAILING_INPUT';
+        if vCtx.FAIL_POS = vLongest then
+          pExpected := vCtx.EXPECTED;
+          pPath     := vCtx.FAIL_PATH;
+        end if;
       else
-        pErrorPosition  := greatest(nvl(vFailPos, 1), 1);
-        pFailedNodeName := vFailNode;
+        pErrorPosition := greatest(vCtx.FAIL_POS, 1);
+        pExpected      := vCtx.EXPECTED;
+        pPath          := vCtx.FAIL_PATH;
+        if pExpected.count > 0 then
+          pFailedNodeName := pExpected(1);
+        end if;
       end if;
-      pErrorMessage   := 'Parsing failed at character index ' || to_char(pErrorPosition)
-                         || ' ("' || substr(pInput, pErrorPosition, 1) || '")'
-                         || ' while evaluating rule node: ' || nvl(pFailedNodeName, 'UNKNOWN');
     end if;
   end if;
+end EvaluateInput;
+
+function BuildMessage(
+           pInput    varchar2
+         , pPosition integer
+         , pExpected TY_ABNF_StrList
+         , pPath     varchar2
+         , pTrailing boolean
+         ) return varchar2 is
+  vLen    integer := nvl(length(pInput), 0);
+  vLine   integer;
+  vColumn integer;
+  vCount  integer := pExpected.count;
+  vList   varchar2(4000);
+  vResult varchar2(32767);
+begin
+  LineAndColumn(pInput, pPosition, vLine, vColumn);
+  vResult := 'Line ' || to_char(vLine) || ', column ' || to_char(vColumn) || ': ';
+
+  if pTrailing then
+    vResult := vResult || 'unexpected input "' || TY_ABNF_Context.Escape(substr(pInput, pPosition, 1))
+               || '" after a complete match of ' || to_char(pPosition - 1) || ' character(s)';
+    vList   := JoinExpected(pExpected, 'end of input');
+    vCount  := vCount + 1;
+  else
+    if pPosition > vLen then
+      vResult := vResult || 'unexpected end of input';
+    else
+      vResult := vResult || 'found "' || TY_ABNF_Context.Escape(substr(pInput, pPosition, 1)) || '"';
+    end if;
+    vList := JoinExpected(pExpected);
+  end if;
+
+  if vCount > 0 then
+    vResult := vResult || ', expected ' || case when vCount > 1 then 'one of: ' end || vList;
+  end if;
+  if pPath is not null then
+    vResult := vResult || ' (while matching rule: ' || pPath || ')';
+  end if;
+
+  return substr(vResult, 1, 4000);
+end BuildMessage;
+
+------------------------------------------------------------------------------
+-- ValidateInput
+------------------------------------------------------------------------------
+procedure ValidateInputImpl(
+            pNode           in  TY_ABNF_Node
+          , pRules          in  TY_ABNF_RuleSet
+          , pInput          in  varchar2
+          , pIsValid        out boolean
+          , pErrorPosition  out integer
+          , pFailedNodeName out varchar2
+          , pErrorMessage   out varchar2
+          ) is
+  vExpected TY_ABNF_StrList;
+  vPath     varchar2(4000);
+  vTrailing boolean;
+begin
+  EvaluateInput(pNode, pRules, pInput, pIsValid, pErrorPosition, pFailedNodeName, vExpected, vPath, vTrailing);
+
+  if pIsValid then
+    pErrorMessage := null;
+  elsif pNode is null then
+    pErrorMessage := 'Root rule node is null.';
+  else
+    pErrorMessage := BuildMessage(pInput, pErrorPosition, vExpected, vPath, vTrailing);
+  end if;
+end ValidateInputImpl;
+
+function ValidateInput(
+           pNode  TY_ABNF_Node
+         , pInput varchar2
+         ) return boolean is
+  vIsValid        boolean;
+  vErrorPosition  integer;
+  vFailedNodeName varchar2(4000);
+  vErrorMessage   varchar2(4000);
+begin
+  ValidateInputImpl(pNode, null, pInput, vIsValid, vErrorPosition, vFailedNodeName, vErrorMessage);
+  return vIsValid;
+end ValidateInput;
+
+procedure ValidateInput(
+            pNode           in  TY_ABNF_Node
+          , pInput          in  varchar2
+          , pIsValid        out boolean
+          , pErrorPosition  out integer
+          , pFailedNodeName out varchar2
+          , pErrorMessage   out varchar2
+          ) is
+begin
+  ValidateInputImpl(pNode, null, pInput, pIsValid, pErrorPosition, pFailedNodeName, pErrorMessage);
+end ValidateInput;
+
+function ValidateInput(
+           pRules     TY_ABNF_RuleSet
+         , pStartRule varchar2
+         , pInput     varchar2
+         ) return boolean is
+  vIsValid        boolean;
+  vErrorPosition  integer;
+  vFailedNodeName varchar2(4000);
+  vErrorMessage   varchar2(4000);
+begin
+  ValidateInputImpl(StartNode(pRules, pStartRule), pRules, pInput, vIsValid, vErrorPosition, vFailedNodeName, vErrorMessage);
+  return vIsValid;
+end ValidateInput;
+
+procedure ValidateInput(
+            pRules          in  TY_ABNF_RuleSet
+          , pStartRule      in  varchar2
+          , pInput          in  varchar2
+          , pIsValid        out boolean
+          , pErrorPosition  out integer
+          , pFailedNodeName out varchar2
+          , pErrorMessage   out varchar2
+          ) is
+begin
+  ValidateInputImpl(
+    StartNode(pRules, pStartRule), pRules, pInput, pIsValid, pErrorPosition, pFailedNodeName, pErrorMessage
+  );
 end ValidateInput;
 
 ------------------------------------------------------------------------------
--- Grammar Generator Helpers
+-- ExplainMismatch
 ------------------------------------------------------------------------------
-function CleanGrammarLine(pLine varchar2) return varchar2 is
-  vInQuote boolean := False;
-  vLen     integer;
-  vCh      varchar2(4);
+procedure ExplainImpl(
+            pNode      in  TY_ABNF_Node
+          , pRules     in  TY_ABNF_RuleSet
+          , pInput     in  varchar2
+          , pIsValid   out boolean
+          , pPosition  out integer
+          , pLine      out integer
+          , pColumn    out integer
+          , pFound     out varchar2
+          , pExpected  out TY_ABNF_StrList
+          , pMessage   out varchar2
+          ) is
+  vFailedNodeName varchar2(4000);
+  vPath           varchar2(4000);
+  vTrailing       boolean;
 begin
-  if pLine is null then
-    return null;
-  end if;
+  pLine   := null;
+  pColumn := null;
+  pFound  := null;
+  EvaluateInput(pNode, pRules, pInput, pIsValid, pPosition, vFailedNodeName, pExpected, vPath, vTrailing);
 
-  vLen := length(pLine);
-  for i in 1 .. vLen loop
-    vCh := substr(pLine, i, 1);
-    if vCh = '"' then
-      vInQuote := not vInQuote;
-    elsif not vInQuote and vCh = ';' then
-      return trim(substr(pLine, 1, i - 1));
-    end if;
-  end loop;
-  return trim(pLine);
-end CleanGrammarLine;
-
-function FindEqualsSign(pLine varchar2) return integer is
-  vInQuote boolean := False;
-  vLen     integer;
-  vCh      varchar2(4);
-begin
-  if pLine is null then
-    return 0;
-  end if;
-
-  vLen := length(pLine);
-  for i in 1 .. vLen loop
-    vCh := substr(pLine, i, 1);
-    if vCh = '"' then
-      vInQuote := not vInQuote;
-    elsif not vInQuote and vCh = '=' then
-      return i;
-    end if;
-  end loop;
-  return 0;
-end FindEqualsSign;
-
-function FormatPascalName(pName varchar2) return varchar2 is
-  vClean  varchar2(100);
-  vResult varchar2(100) := '';
-  vCap    boolean := True;
-  vChar   varchar2(4);
-  vLen    integer;
-begin
-  if pName is null then
-    return '';
-  end if;
-
-  vClean := translate(pName, '-_/.', '    ');
-  vLen   := length(vClean);
-  for i in 1 .. vLen loop
-    vChar := substr(vClean, i, 1);
-    if vChar = ' ' then
-      vCap := True;
-    elsif vCap then
-      vResult := vResult || upper(vChar);
-      vCap := False;
-    else
-      vResult := vResult || lower(vChar);
-    end if;
-  end loop;
-  return vResult;
-end FormatPascalName;
-
-function ParseRangeExpr(pExpr varchar2) return varchar2 is
-  vExpr   varchar2(100) := trim(pExpr);
-  vBase   varchar2(1);
-  vStr    varchar2(100);
-  vDash   integer;
-  vDot    integer;
-  vMin    integer;
-  vMax    integer;
-  vPart   varchar2(20);
-  vVal    integer;
-  vLit    varchar2(1000) := '';
-  vResult varchar2(1000);
-begin
-  if length(vExpr) < 3 then
-    return null;
-  end if;
-
-  vBase := lower(substr(vExpr, 2, 1));
-  vStr  := substr(vExpr, 3);
-  vDash := instr(vStr, '-');
-  vDot  := instr(vStr, '.');
-
-  if vDash > 0 then
-    if vBase = 'd' then
-      vMin := to_number(substr(vStr, 1, vDash - 1));
-      vMax := to_number(substr(vStr, vDash + 1));
-    elsif vBase = 'x' then
-      vMin := to_number(substr(vStr, 1, vDash - 1), 'XX');
-      vMax := to_number(substr(vStr, vDash + 1), 'XX');
-    elsif vBase = 'b' then
-      vMin := to_number(substr(vStr, 1, vDash - 1));
-      vMax := to_number(substr(vStr, vDash + 1));
-    end if;
-    vResult := 'TY_ABNF_Range(NODE_NAME => ''RANGE'', MIN_CODE => ' || to_char(vMin) || ', MAX_CODE => ' || to_char(vMax) || ')';
-  elsif vDot > 0 then
-    vStr := vStr || '.';
-    while length(vStr) > 0 loop
-      vDot  := instr(vStr, '.');
-      vPart := substr(vStr, 1, vDot - 1);
-      vStr  := substr(vStr, vDot + 1);
-      if vBase = 'x' then
-        vVal := to_number(vPart, 'XX');
-      else
-        vVal := to_number(vPart);
-      end if;
-      if vLit is not null then
-        vLit := vLit || ' || ';
-      end if;
-      vLit := vLit || 'chr(' || to_char(vVal) || ')';
-    end loop;
-    vResult := 'TY_ABNF_Literal(NODE_NAME => ''LITERAL'', VALUE => ' || vLit || ')';
+  if pIsValid then
+    pMessage := null;
+  elsif pNode is null then
+    pMessage := 'Root rule node is null.';
   else
-    if vBase = 'd' then
-      vMin := to_number(vStr);
-    elsif vBase = 'x' then
-      vMin := to_number(vStr, 'XX');
-    elsif vBase = 'b' then
-      vMin := to_number(vStr);
+    LineAndColumn(pInput, pPosition, pLine, pColumn);
+    if pPosition <= nvl(length(pInput), 0) then
+      pFound := substr(pInput, pPosition, 1);
     end if;
-    vResult := 'TY_ABNF_Range(NODE_NAME => ''RANGE'', MIN_CODE => ' || to_char(vMin) || ', MAX_CODE => ' || to_char(vMin) || ')';
+    pMessage := BuildMessage(pInput, pPosition, pExpected, vPath, vTrailing);
+    if vTrailing then
+      -- BuildMessage names "end of input" itself; the structured result lists it as an expected item too
+      pExpected.extend;
+      pExpected(pExpected.count) := 'end of input';
+    end if;
   end if;
+end ExplainImpl;
 
-  return vResult;
-end ParseRangeExpr;
-
-procedure SkipWhitespace(pStr in varchar2, pPos in out integer) is
-  vLen integer := nvl(length(pStr), 0);
-  vCh  varchar2(4);
+function ExplainMismatch(
+           pNode  TY_ABNF_Node
+         , pInput varchar2
+         ) return varchar2 is
+  vIsValid   boolean;
+  vPosition  integer;
+  vLine      integer;
+  vColumn    integer;
+  vFound     varchar2(10);
+  vExpected  TY_ABNF_StrList;
+  vMessage   varchar2(4000);
 begin
-  while pPos <= vLen loop
-    vCh := substr(pStr, pPos, 1);
-    if vCh in (' ', chr(9), chr(10), chr(13)) then
-      pPos := pPos + 1;
+  ExplainImpl(pNode, null, pInput, vIsValid, vPosition, vLine, vColumn, vFound, vExpected, vMessage);
+  return vMessage;
+end ExplainMismatch;
+
+function ExplainMismatch(
+           pRules     TY_ABNF_RuleSet
+         , pStartRule varchar2
+         , pInput     varchar2
+         ) return varchar2 is
+  vIsValid   boolean;
+  vPosition  integer;
+  vLine      integer;
+  vColumn    integer;
+  vFound     varchar2(10);
+  vExpected  TY_ABNF_StrList;
+  vMessage   varchar2(4000);
+begin
+  ExplainImpl(StartNode(pRules, pStartRule), pRules, pInput, vIsValid, vPosition, vLine, vColumn, vFound, vExpected, vMessage);
+  return vMessage;
+end ExplainMismatch;
+
+procedure ExplainMismatch(
+            pNode      in  TY_ABNF_Node
+          , pInput     in  varchar2
+          , pIsValid   out boolean
+          , pPosition  out integer
+          , pLine      out integer
+          , pColumn    out integer
+          , pFound     out varchar2
+          , pExpected  out TY_ABNF_StrList
+          , pMessage   out varchar2
+          ) is
+begin
+  ExplainImpl(pNode, null, pInput, pIsValid, pPosition, pLine, pColumn, pFound, pExpected, pMessage);
+end ExplainMismatch;
+
+procedure ExplainMismatch(
+            pRules     in  TY_ABNF_RuleSet
+          , pStartRule in  varchar2
+          , pInput     in  varchar2
+          , pIsValid   out boolean
+          , pPosition  out integer
+          , pLine      out integer
+          , pColumn    out integer
+          , pFound     out varchar2
+          , pExpected  out TY_ABNF_StrList
+          , pMessage   out varchar2
+          ) is
+begin
+  ExplainImpl(StartNode(pRules, pStartRule), pRules, pInput, pIsValid, pPosition, pLine, pColumn, pFound, pExpected, pMessage);
+end ExplainMismatch;
+
+------------------------------------------------------------------------------
+-- Grammar parser (RFC 5234 section 4 + RFC 7405)
+--
+--   rulelist       = 1*( rule / (*c-wsp c-nl) )
+--   rule           = rulename defined-as elements c-nl
+--   alternation    = concatenation *(*c-wsp "/" *c-wsp concatenation)
+--   concatenation  = repetition *(1*c-wsp repetition)
+--   repetition     = [repeat] element
+--   element        = rulename / group / option / char-val / num-val / prose-val
+--
+-- The parser is lenient about layout: any mix of spaces, tabs, LF, CRLF and CR is
+-- accepted between tokens, rules may be indented, and a new rule starts wherever
+-- a rule name is followed by "=" or "=/".
+------------------------------------------------------------------------------
+function IsAlpha(pCh varchar2) return boolean is
+  vCode   integer := ascii(pCh);
+  vResult boolean := False;
+begin
+  if vCode between 65 and 90 or vCode between 97 and 122 then
+    vResult := True;
+  end if;
+  return vResult;
+end IsAlpha;
+
+function IsDigit(pCh varchar2) return boolean is
+  vResult boolean := False;
+begin
+  if ascii(pCh) between 48 and 57 then
+    vResult := True;
+  end if;
+  return vResult;
+end IsDigit;
+
+function IsNameChar(pCh varchar2) return boolean is
+  vResult boolean := False;
+begin
+  if IsAlpha(pCh) or IsDigit(pCh) or pCh in ('-', '_') then
+    vResult := True;
+  end if;
+  return vResult;
+end IsNameChar;
+
+procedure SyntaxError(pStr varchar2, pPos integer, pMessage varchar2) is
+  vLine   integer;
+  vColumn integer;
+begin
+  LineAndColumn(pStr, pPos, vLine, vColumn);
+  raise_application_error(
+    -20110
+  , 'ABNF syntax error at line ' || to_char(vLine) || ', column ' || to_char(vColumn) || ': ' || pMessage
+  );
+end SyntaxError;
+
+function AppendText(pText varchar2, pAdd varchar2) return varchar2 is
+  vResult varchar2(4000) := pText;
+begin
+  if pAdd is not null then
+    vResult := substr(case when pText is null then pAdd else pText || LF || pAdd end, 1, 4000);
+  end if;
+  return vResult;
+end AppendText;
+
+function Cur(pP in TParser) return varchar2 is
+begin
+  return substr(pP.Str, pP.Pos, 1);
+end Cur;
+
+-- A token is being read: comments seen since the last token now belong to the current rule
+procedure Mark(pP in out nocopy TParser) is
+begin
+  pP.Cmt      := AppendText(pP.Cmt, pP.Tail);
+  pP.Tail     := null;
+  pP.LineTok  := True;
+  pP.LineUsed := True;
+end Mark;
+
+procedure Take(pP in out nocopy TParser, pCount integer) is
+begin
+  Mark(pP);
+  pP.Pos := pP.Pos + pCount;
+end Take;
+
+-- Skips white space and comments. A comment after a token on the same line is a trailing comment of the
+-- current rule; a comment on its own line is held until the next token (or, after a blank line, dropped).
+procedure SkipWs(pP in out nocopy TParser) is
+  vCh   varchar2(1);
+  vEnd  integer;
+  vText varchar2(4000);
+begin
+  while pP.Pos <= pP.Len
+  loop
+    vCh := substr(pP.Str, pP.Pos, 1);
+    if vCh in (' ', chr(9)) then
+      pP.Pos := pP.Pos + 1;
+    elsif vCh = LF then
+      if not pP.LineUsed then
+        pP.Tail := null;
+      end if;
+      pP.LineUsed  := False;
+      pP.LineTok   := False;
+      pP.Pos       := pP.Pos + 1;
+      pP.LineStart := pP.Pos;
+    elsif vCh = ';' then
+      vEnd := instr(pP.Str, LF, pP.Pos);
+      if vEnd = 0 then
+        vEnd := pP.Len + 1;
+      end if;
+      vText := trim(substr(pP.Str, pP.Pos + 1, vEnd - pP.Pos - 1));
+      pP.LineUsed := True;
+      -- A comment indented deeper than the rule name (as RFC 5234 itself lays them out) goes with that rule
+      if pP.LineTok or pP.Pos - pP.LineStart > pP.RuleIndent then
+        pP.Cmt := AppendText(pP.Cmt, vText);
+      else
+        pP.Tail := AppendText(pP.Tail, vText);
+      end if;
+      pP.Pos := vEnd;
     else
       exit;
     end if;
   end loop;
-end SkipWhitespace;
+end SkipWs;
 
--- Forward declarations for recursive descent parser
-function ParseAlternation(
-           pStr    in     varchar2
-         , pPos    in out integer
-         , pIndent in     integer
-         ) return varchar2;
-
-function ParseConcatenation(
-           pStr    in     varchar2
-         , pPos    in out integer
-         , pIndent in     integer
-         ) return varchar2;
-
-function ParseRepetition(
-           pStr    in     varchar2
-         , pPos    in out integer
-         , pIndent in     integer
-         ) return varchar2;
-
-function ParseElement(
-           pStr    in     varchar2
-         , pPos    in out integer
-         , pIndent in     integer
-         ) return varchar2;
-
-function ParseElement(
-           pStr    in     varchar2
-         , pPos    in out integer
-         , pIndent in     integer
-         ) return varchar2 is
-  vInd    varchar2(100) := rpad(' ', pIndent);
-  vCh     varchar2(4);
-  vCode   integer;
-  vResult varchar2(32767);
-  vEndPos integer;
-  vVal    varchar2(4000);
-  vEsc    varchar2(4000);
-  vName   varchar2(128) := '';
-  vUpper  varchar2(128);
-  vLen    integer := nvl(length(pStr), 0);
+-- Is the rule name starting at pPos followed by "=" (or "=/")? Looks ahead only.
+function PeekIsDefinedAs(pStr varchar2, pPos integer, pLen integer) return boolean is
+  vPos    integer := pPos;
+  vCh     varchar2(1);
+  vResult boolean := False;
 begin
-  SkipWhitespace(pStr, pPos);
-  if pPos > vLen then
-    return null;
+  while vPos <= pLen and IsNameChar(substr(pStr, vPos, 1))
+  loop
+    vPos := vPos + 1;
+  end loop;
+
+  while vPos <= pLen
+  loop
+    vCh := substr(pStr, vPos, 1);
+    if vCh in (' ', chr(9), LF) then
+      vPos := vPos + 1;
+    elsif vCh = ';' then
+      vPos := instr(pStr, LF, vPos);
+      if vPos = 0 then
+        vPos := pLen + 1;
+      end if;
+    else
+      exit;
+    end if;
+  end loop;
+
+  if vPos <= pLen and substr(pStr, vPos, 1) = '=' then
+    vResult := True;
+  end if;
+  return vResult;
+end PeekIsDefinedAs;
+
+function MakeAlternative(pBranches TY_ABNF_NodeList) return TY_ABNF_Node is
+  vResult TY_ABNF_Node;
+begin
+  if pBranches.count = 1 then
+    vResult := pBranches(1);
+  else
+    vResult := TY_ABNF_Alternative(NODE_NAME => null, CHILD_NODES => pBranches);
+  end if;
+  return vResult;
+end MakeAlternative;
+
+-- Reads a run of valid digits for the numeric base (x, d or b) of a %x/%d/%b value
+function ReadDigits(pP in out nocopy TParser, pBase varchar2) return varchar2 is
+  vValid  varchar2(30) := case pBase
+                            when 'x' then '0123456789ABCDEFabcdef'
+                            when 'd' then '0123456789'
+                            else '01'
+                          end;
+  vResult varchar2(100);
+begin
+  while pP.Pos <= pP.Len and instr(vValid, substr(pP.Str, pP.Pos, 1)) > 0
+  loop
+    vResult := vResult || substr(pP.Str, pP.Pos, 1);
+    pP.Pos  := pP.Pos + 1;
+  end loop;
+  if vResult is null then
+    SyntaxError(pP.Str, pP.Pos, 'expected ' || case pBase when 'x' then 'hexadecimal' when 'd' then 'decimal' else 'binary' end
+                                 || ' digits in %' || pBase || ' value');
+  end if;
+  return vResult;
+end ReadDigits;
+
+function ToCode(pP in TParser, pPos integer, pDigits varchar2, pBase varchar2) return integer is
+  vResult integer := 0;
+begin
+  if length(pDigits) > 8 then
+    SyntaxError(pP.Str, pPos, 'numeric value %' || pBase || pDigits || ' is too large');
+  end if;
+  if pBase = 'x' then
+    vResult := to_number(pDigits, 'XXXXXXXX');
+  elsif pBase = 'd' then
+    vResult := to_number(pDigits);
+  else
+    for i in 1..length(pDigits)
+    loop
+      vResult := vResult * 2 + to_number(substr(pDigits, i, 1));
+    end loop;
+  end if;
+  if vResult > 255 then
+    SyntaxError(pP.Str, pPos, 'value ' || to_char(vResult) || ' is above %xFF, which is not supported');
+  end if;
+  return vResult;
+end ToCode;
+
+-- "text" / %s"text" / %i"text": positioned on the opening quote
+function ParseCharVal(pP in out nocopy TParser, pCaseSensitive varchar2) return TY_ABNF_Node is
+  vEnd  integer := instr(pP.Str, '"', pP.Pos + 1);
+  vNl   integer := instr(pP.Str, LF, pP.Pos + 1);
+  vText varchar2(32767);
+begin
+  if vEnd = 0 or (vNl > 0 and vNl < vEnd) then
+    SyntaxError(pP.Str, pP.Pos, 'unterminated string, expected a closing double quote');
+  end if;
+  vText := substr(pP.Str, pP.Pos + 1, vEnd - pP.Pos - 1);
+  Take(pP, vEnd - pP.Pos + 1);
+  return TY_ABNF_Literal(NODE_NAME => null, VALUE => vText, CASE_SENSITIVE => pCaseSensitive);
+end ParseCharVal;
+
+-- %x41 / %x41-5A / %x0D.0A, also %d and %b: positioned on the "%"
+function ParseNumVal(pP in out nocopy TParser) return TY_ABNF_Node is
+  vStart  integer := pP.Pos;
+  vBase   varchar2(1) := lower(substr(pP.Str, pP.Pos + 1, 1));
+  vDigits varchar2(100);
+  vFirst  integer;
+  vLast   integer;
+  vValue  varchar2(4000);
+  vResult TY_ABNF_Node;
+begin
+  Take(pP, 2);
+  vDigits := ReadDigits(pP, vBase);
+  vFirst  := ToCode(pP, vStart, vDigits, vBase);
+
+  if Cur(pP) = '-' then
+    Take(pP, 1);
+    vDigits := ReadDigits(pP, vBase);
+    vLast   := ToCode(pP, vStart, vDigits, vBase);
+    if vLast < vFirst then
+      SyntaxError(pP.Str, vStart, 'range end is lower than range start');
+    end if;
+    vResult := TY_ABNF_Range(NODE_NAME => null, MIN_CODE => vFirst, MAX_CODE => vLast);
+  else
+    vValue := chr(vFirst);
+    while Cur(pP) = '.'
+    loop
+      Take(pP, 1);
+      vDigits := ReadDigits(pP, vBase);
+      vValue  := vValue || chr(ToCode(pP, vStart, vDigits, vBase));
+    end loop;
+    vResult := TY_ABNF_Literal(NODE_NAME => null, VALUE => vValue, CASE_SENSITIVE => 'Y');
   end if;
 
-  vCh := substr(pStr, pPos, 1);
+  return vResult;
+end ParseNumVal;
 
-  if vCh = '(' then
-    -- Group ( ... )
-    pPos := pPos + 1; -- consume '('
-    vResult := ParseAlternation(pStr, pPos, pIndent);
-    SkipWhitespace(pStr, pPos);
-    if pPos <= vLen and substr(pStr, pPos, 1) = ')' then
-      pPos := pPos + 1; -- consume ')'
+function ParseAlternation(pP in out nocopy TParser) return TY_ABNF_NodeList;
+
+-- Positioned on the first character of an element
+function ParseElement(pP in out nocopy TParser) return TY_ABNF_Node is
+  vCh       varchar2(1) := Cur(pP);
+  vStart    integer := pP.Pos;
+  vNext     varchar2(1);
+  vEnd      integer;
+  vName     varchar2(128);
+  vBranches TY_ABNF_NodeList;
+  vResult   TY_ABNF_Node;
+begin
+  if vCh = '(' or vCh = '[' then
+    Take(pP, 1);
+    vBranches := ParseAlternation(pP);
+    SkipWs(pP);
+    if Cur(pP) is null or Cur(pP) <> case vCh when '(' then ')' else ']' end then
+      SyntaxError(pP.Str, vStart, 'expected "' || case vCh when '(' then ')' else ']' end
+                                  || '" to close the "' || vCh || '" opened here');
     end if;
-
-  elsif vCh = '[' then
-    -- Option [ ... ]
-    pPos := pPos + 1; -- consume '['
-    vResult := ParseAlternation(pStr, pPos, pIndent + 2);
-    SkipWhitespace(pStr, pPos);
-    if pPos <= vLen and substr(pStr, pPos, 1) = ']' then
-      pPos := pPos + 1; -- consume ']'
+    Take(pP, 1);
+    vResult := MakeAlternative(vBranches);
+    if vCh = '[' then
+      vResult := TY_ABNF_Repetition(NODE_NAME => null, MIN_OCCURS => 0, MAX_OCCURS => 1, CHILD_NODE => vResult);
     end if;
-
-    vResult := 'TY_ABNF_Repetition(' || chr(10)
-            || vInd || '  NODE_NAME  => ''OPTIONAL''' || chr(10)
-            || vInd || ', MIN_OCCURS => 0' || chr(10)
-            || vInd || ', MAX_OCCURS => 1' || chr(10)
-            || vInd || ', CHILD_NODE => ' || vResult || chr(10)
-            || vInd || ')';
 
   elsif vCh = '"' then
-    -- String Literal "..."
-    pPos := pPos + 1; -- consume opening '"'
-    vEndPos := instr(pStr, '"', pPos);
-    if vEndPos = 0 then
-      vEndPos := vLen + 1;
-    end if;
-    vVal := substr(pStr, pPos, vEndPos - pPos);
-    pPos := vEndPos + 1; -- consume closing '"'
-    vEsc := replace(vVal, '''', '''''');
-    vResult := 'TY_ABNF_Literal(NODE_NAME => ''LITERAL'', VALUE => ''' || vEsc || ''')';
+    vResult := ParseCharVal(pP, 'N');
 
   elsif vCh = '%' then
-    -- Numeric value or range %x... or %d...
-    vEndPos := pPos + 1;
-    while vEndPos <= vLen loop
-      vCh := substr(pStr, vEndPos, 1);
-      if vCh in (' ', chr(9), chr(10), chr(13), ')', ']', '/') then
-        exit;
-      end if;
-      vEndPos := vEndPos + 1;
+    vNext := lower(substr(pP.Str, pP.Pos + 1, 1));
+    if vNext in ('s', 'i') and substr(pP.Str, pP.Pos + 2, 1) = '"' then
+      Take(pP, 2);
+      vResult := ParseCharVal(pP, case vNext when 's' then 'Y' else 'N' end);
+    elsif vNext in ('x', 'd', 'b') then
+      vResult := ParseNumVal(pP);
+    else
+      SyntaxError(pP.Str, vStart, 'expected x, d, b, s or i after "%"');
+    end if;
+
+  elsif vCh = '<' then
+    vEnd := instr(pP.Str, '>', pP.Pos + 1);
+    if vEnd = 0 or instr(substr(pP.Str, pP.Pos, vEnd - pP.Pos), LF) > 0 then
+      SyntaxError(pP.Str, vStart, 'unterminated prose value, expected ">"');
+    end if;
+    vResult := TY_ABNF_Prose(NODE_NAME => null, TEXT => substr(pP.Str, pP.Pos + 1, vEnd - pP.Pos - 1));
+    Take(pP, vEnd - pP.Pos + 1);
+
+  elsif IsAlpha(vCh) then
+    Mark(pP);
+    while pP.Pos <= pP.Len and IsNameChar(substr(pP.Str, pP.Pos, 1))
+    loop
+      vName  := vName || substr(pP.Str, pP.Pos, 1);
+      pP.Pos := pP.Pos + 1;
     end loop;
-    vVal := substr(pStr, pPos, vEndPos - pPos);
-    pPos := vEndPos;
-    vResult := ParseRangeExpr(vVal);
+    vResult := TY_ABNF_RuleRef(NODE_NAME => null, RULE_NAME => vName);
 
   else
-    -- Rule Name / Identifier
-    while pPos <= vLen loop
-      vCh := substr(pStr, pPos, 1);
-      vCode := ascii(vCh);
-      if (vCode >= 65 and vCode <= 90)    -- A-Z
-         or (vCode >= 97 and vCode <= 122) -- a-z
-         or (vCode >= 48 and vCode <= 57)  -- 0-9
-         or vCh in ('-', '_') then
-        vName := vName || vCh;
-        pPos := pPos + 1;
-      else
-        exit;
-      end if;
-    end loop;
-
-    if length(vName) > 0 then
-      vUpper := upper(vName);
-      if vUpper = 'ALPHA' then
-        vResult := 'P_ABNF_Engine.CoreAlpha()';
-      elsif vUpper = 'DIGIT' then
-        vResult := 'P_ABNF_Engine.CoreDigit()';
-      elsif vUpper = 'HEXDIG' then
-        vResult := 'P_ABNF_Engine.CoreHexDig()';
-      elsif vUpper = 'BIT' then
-        vResult := 'P_ABNF_Engine.CoreBit()';
-      elsif vUpper = 'VCHAR' then
-        vResult := 'P_ABNF_Engine.CoreVchar()';
-      elsif vUpper = 'WSP' then
-        vResult := 'P_ABNF_Engine.CoreWsp()';
-      elsif vUpper = 'CRLF' then
-        vResult := 'P_ABNF_Engine.CoreCrlf()';
-      elsif vUpper = 'SP' then
-        vResult := 'TY_ABNF_Literal(NODE_NAME => ''SP'', VALUE => '' '')';
-      elsif vUpper = 'HTAB' then
-        vResult := 'TY_ABNF_Literal(NODE_NAME => ''HTAB'', VALUE => chr(9))';
-      elsif vUpper = 'DQUOTE' then
-        vResult := 'TY_ABNF_Literal(NODE_NAME => ''DQUOTE'', VALUE => ''"'')';
-      else
-        vResult := 'Get' || FormatPascalName(vName) || 'Rule()';
-      end if;
-    end if;
+    SyntaxError(pP.Str, vStart, 'unexpected ' || case when vCh is null then 'end of grammar' else '"' || vCh || '"' end);
   end if;
 
   return vResult;
 end ParseElement;
 
-function ParseRepetition(
-           pStr    in     varchar2
-         , pPos    in out integer
-         , pIndent in     integer
-         ) return varchar2 is
-  vInd       varchar2(100) := rpad(' ', pIndent);
-  vHasRepeat boolean := False;
-  vMinStr    varchar2(20) := null;
-  vMaxStr    varchar2(20) := null;
-  vHasStar   boolean := False;
-  vCh        varchar2(4);
-  vCode      integer;
-  vElemCode  varchar2(32767);
-  vResult    varchar2(32767);
-  vLen       integer := nvl(length(pStr), 0);
+-- Reads the digits of a repeat count (null if none)
+function ReadCount(pP in out nocopy TParser) return integer is
+  vDigits varchar2(20);
 begin
-  SkipWhitespace(pStr, pPos);
-  if pPos > vLen then
-    return null;
-  end if;
+  while pP.Pos <= pP.Len and IsDigit(substr(pP.Str, pP.Pos, 1))
+  loop
+    vDigits := vDigits || substr(pP.Str, pP.Pos, 1);
+    pP.Pos  := pP.Pos + 1;
+  end loop;
+  return to_number(vDigits);
+end ReadCount;
 
-  vCh := substr(pStr, pPos, 1);
-  vCode := ascii(vCh);
-
-  -- Check if starts with a digit or '*'
-  if (vCode >= 48 and vCode <= 57) or vCh = '*' then
-    vHasRepeat := True;
-
-    -- Read digits before '*' (if any)
-    while pPos <= vLen loop
-      vCode := ascii(substr(pStr, pPos, 1));
-      if vCode >= 48 and vCode <= 57 then
-        vMinStr := vMinStr || substr(pStr, pPos, 1);
-        pPos := pPos + 1;
-      else
-        exit;
-      end if;
-    end loop;
-
-    -- Check for '*'
-    if pPos <= vLen and substr(pStr, pPos, 1) = '*' then
-      vHasStar := True;
-      pPos := pPos + 1; -- consume '*'
-      -- Read digits after '*' (if any)
-      while pPos <= vLen loop
-        vCode := ascii(substr(pStr, pPos, 1));
-        if vCode >= 48 and vCode <= 57 then
-          vMaxStr := vMaxStr || substr(pStr, pPos, 1);
-          pPos := pPos + 1;
-        else
-          exit;
-        end if;
-      end loop;
-    end if;
-
-    if not vHasStar then
-      -- Exact count: n
-      vMaxStr := vMinStr;
+-- [repeat] element, where repeat is n, n*m, *, n*, *m
+function ParseRepetition(pP in out nocopy TParser) return TY_ABNF_Node is
+  vStart     integer := pP.Pos;
+  vHasPrefix boolean := False;
+  vMin       integer;
+  vMax       integer;
+  vElement   TY_ABNF_Node;
+  vResult    TY_ABNF_Node;
+begin
+  if IsDigit(Cur(pP)) or Cur(pP) = '*' then
+    vHasPrefix := True;
+    Mark(pP);
+    vMin := ReadCount(pP);
+    if Cur(pP) = '*' then
+      pP.Pos := pP.Pos + 1;
+      vMax   := ReadCount(pP);
+      vMin   := nvl(vMin, 0);
     else
-      if vMinStr is null then
-        vMinStr := '0';
-      end if;
+      vMax := vMin;
+    end if;
+    if vMax is not null and vMin > vMax then
+      SyntaxError(pP.Str, vStart, 'repeat minimum ' || to_char(vMin) || ' is greater than maximum ' || to_char(vMax));
+    end if;
+    if Cur(pP) is null or Cur(pP) in (' ', chr(9), LF, ';') then
+      SyntaxError(pP.Str, pP.Pos, 'a repeat must be followed immediately by an element');
     end if;
   end if;
 
-  SkipWhitespace(pStr, pPos);
-  vElemCode := ParseElement(pStr, pPos, pIndent + 2);
-  if vElemCode is null then
-    return null;
-  end if;
-
-  if vHasRepeat then
-    vResult := 'TY_ABNF_Repetition(' || chr(10)
-            || vInd || '  NODE_NAME  => ''REPEAT''' || chr(10)
-            || vInd || ', MIN_OCCURS => ' || vMinStr || chr(10)
-            || vInd || ', MAX_OCCURS => ' || nvl(vMaxStr, 'null') || chr(10)
-            || vInd || ', CHILD_NODE => ' || vElemCode || chr(10)
-            || vInd || ')';
+  vElement := ParseElement(pP);
+  if vHasPrefix then
+    vResult := TY_ABNF_Repetition(NODE_NAME => null, MIN_OCCURS => vMin, MAX_OCCURS => vMax, CHILD_NODE => vElement);
   else
-    vResult := vElemCode;
+    vResult := vElement;
   end if;
-
   return vResult;
 end ParseRepetition;
 
-function ParseConcatenation(
-           pStr    in     varchar2
-         , pPos    in out integer
-         , pIndent in     integer
-         ) return varchar2 is
-  vChild  varchar2(32767);
-  vResult varchar2(32767);
-  vCount  integer := 0;
-  vInd    varchar2(100) := rpad(' ', pIndent);
-  vCh     varchar2(4);
-  vLen    integer := nvl(length(pStr), 0);
+function ParseConcatenation(pP in out nocopy TParser) return TY_ABNF_Node is
+  vItems  TY_ABNF_NodeList := TY_ABNF_NodeList();
+  vCh     varchar2(1);
+  vResult TY_ABNF_Node;
 begin
-  SkipWhitespace(pStr, pPos);
-  while pPos <= vLen loop
-    vCh := substr(pStr, pPos, 1);
-    if vCh in ('/', ')', ']') then
-      exit;
-    end if;
-
-    vChild := ParseRepetition(pStr, pPos, pIndent + 2);
-    if vChild is not null then
-      vCount := vCount + 1;
-      if vCount = 1 then
-        vResult := vChild;
-      elsif vCount = 2 then
-        vResult := 'TY_ABNF_Sequence(' || chr(10)
-                || vInd || '  NODE_NAME   => ''SEQ''' || chr(10)
-                || vInd || ', CHILD_NODES => TY_ABNF_NodeList(' || chr(10)
-                || vInd || '                     ' || vResult || chr(10)
-                || vInd || '                   , ' || vChild;
-      else
-        vResult := vResult || chr(10)
-                || vInd || '                   , ' || vChild;
-      end if;
-    else
-      exit;
-    end if;
-
-    SkipWhitespace(pStr, pPos);
+  SkipWs(pP);
+  loop
+    vCh := Cur(pP);
+    exit when vCh is null or vCh in ('/', ')', ']');
+    -- the start of the next rule ends this one
+    exit when IsAlpha(vCh) and PeekIsDefinedAs(pP.Str, pP.Pos, pP.Len);
+    vItems.extend;
+    vItems(vItems.count) := ParseRepetition(pP);
+    SkipWs(pP);
   end loop;
 
-  if vCount > 1 then
-    vResult := vResult || chr(10)
-            || vInd || '                   )' || chr(10)
-            || vInd || ')';
+  if vItems.count = 0 then
+    SyntaxError(pP.Str, pP.Pos, 'expected an element');
+  elsif vItems.count = 1 then
+    vResult := vItems(1);
+  else
+    vResult := TY_ABNF_Sequence(NODE_NAME => null, CHILD_NODES => vItems);
   end if;
-
   return vResult;
 end ParseConcatenation;
 
-function ParseAlternation(
-           pStr    in     varchar2
-         , pPos    in out integer
-         , pIndent in     integer
-         ) return varchar2 is
-  vChild  varchar2(32767);
-  vResult varchar2(32767);
-  vCount  integer := 0;
-  vInd    varchar2(100) := rpad(' ', pIndent);
-  vLen    integer := nvl(length(pStr), 0);
+function ParseAlternation(pP in out nocopy TParser) return TY_ABNF_NodeList is
+  vBranches TY_ABNF_NodeList := TY_ABNF_NodeList();
 begin
-  SkipWhitespace(pStr, pPos);
-  while pPos <= vLen loop
-    vChild := ParseConcatenation(pStr, pPos, pIndent + 2);
-    if vChild is not null then
-      vCount := vCount + 1;
-      if vCount = 1 then
-        vResult := vChild;
-      elsif vCount = 2 then
-        vResult := 'TY_ABNF_Alternative(' || chr(10)
-                || vInd || '  NODE_NAME   => ''ALT''' || chr(10)
-                || vInd || ', CHILD_NODES => TY_ABNF_NodeList(' || chr(10)
-                || vInd || '                     ' || vResult || chr(10)
-                || vInd || '                   , ' || vChild;
-      else
-        vResult := vResult || chr(10)
-                || vInd || '                   , ' || vChild;
-      end if;
-    end if;
-
-    SkipWhitespace(pStr, pPos);
-    if pPos <= vLen and substr(pStr, pPos, 1) = '/' then
-      pPos := pPos + 1; -- consume '/'
-      SkipWhitespace(pStr, pPos);
+  loop
+    vBranches.extend;
+    vBranches(vBranches.count) := ParseConcatenation(pP);
+    SkipWs(pP);
+    if Cur(pP) = '/' then
+      Take(pP, 1);
+      SkipWs(pP);
     else
       exit;
     end if;
   end loop;
-
-  if vCount > 1 then
-    vResult := vResult || chr(10)
-            || vInd || '                   )' || chr(10)
-            || vInd || ')';
-  end if;
-
-  return vResult;
+  return vBranches;
 end ParseAlternation;
 
-procedure FlushRule(
-            pRuleName in     varchar2
-          , pRuleRhs  in     varchar2
-          , pClob     in out clob
-          ) is
-  vFuncName varchar2(100);
-  vBodyCode varchar2(32767);
-  vPos      integer := 1;
-  vCode     varchar2(32767);
+------------------------------------------------------------------------------
+-- ParseGrammar
+------------------------------------------------------------------------------
+function ParseGrammar(pGrammar varchar2) return TY_ABNF_RuleSet is
+  type TRuleDef is record (
+    RuleName varchar2(128)
+  , Branches TY_ABNF_NodeList
+  , Cmt      varchar2(4000)
+  );
+  type TRuleDefTab is table of TRuleDef index by pls_integer;
+  type TIndexTab is table of pls_integer index by varchar2(128);
+
+  vP           TParser;
+  vDefs        TRuleDefTab;
+  vIndex       TIndexTab;
+  vResult      TY_ABNF_RuleSet := TY_ABNF_RuleSet();
+  vName        varchar2(128);
+  vNamePos     integer;
+  vKey         varchar2(128);
+  vIdx         pls_integer;
+  vIncremental boolean;
+  vBranches    TY_ABNF_NodeList;
+  vNode        TY_ABNF_Node;
 begin
-  if trim(pRuleName) is not null and trim(pRuleRhs) is not null then
-    vFuncName := 'Get' || FormatPascalName(trim(pRuleName)) || 'Rule';
-    vBodyCode := ParseAlternation(trim(pRuleRhs), vPos, 4);
+  -- Normalise line endings so CR, LF and CRLF all work and positions give correct line numbers
+  vP.Str      := replace(replace(pGrammar, chr(13) || chr(10), LF), chr(13), LF);
+  vP.Len      := nvl(length(vP.Str), 0);
+  vP.Pos      := 1;
+  vP.LineTok    := False;
+  vP.LineUsed   := False;
+  vP.LineStart  := 1;
+  vP.RuleIndent := 1000000;  -- no rule yet, so no comment can belong to one
 
-    if vBodyCode is not null then
-      vCode := '  function ' || vFuncName || ' return TY_ABNF_Node is' || chr(10)
-            || '    vResult TY_ABNF_Node;' || chr(10)
-            || '  begin' || chr(10)
-            || '    vResult := ' || vBodyCode || ';' || chr(10)
-            || '    return vResult;' || chr(10)
-            || '  end ' || vFuncName || ';' || chr(10) || chr(10);
+  loop
+    SkipWs(vP);
+    exit when vP.Pos > vP.Len;
 
-      DBMS_LOB.WRITEAPPEND(pClob, length(vCode), vCode);
+    -- Comments on the lines directly above the rule are its leading comments
+    vP.Cmt := null;
+    Mark(vP);
+
+    if not IsAlpha(Cur(vP)) then
+      SyntaxError(vP.Str, vP.Pos, 'expected a rule name, found "' || Cur(vP) || '"');
     end if;
+    vNamePos      := vP.Pos;
+    vP.RuleIndent := vP.Pos - vP.LineStart;
+    vName         := null;
+    while vP.Pos <= vP.Len and IsNameChar(substr(vP.Str, vP.Pos, 1))
+    loop
+      vName  := vName || substr(vP.Str, vP.Pos, 1);
+      vP.Pos := vP.Pos + 1;
+    end loop;
+
+    SkipWs(vP);
+    if Cur(vP) is null or Cur(vP) <> '=' then
+      SyntaxError(vP.Str, vP.Pos, 'expected "=" or "=/" after rule name "' || vName || '"');
+    end if;
+    Take(vP, 1);
+    vIncremental := False;
+    if Cur(vP) = '/' then
+      Take(vP, 1);
+      vIncremental := True;
+    end if;
+
+    SkipWs(vP);
+    vBranches := ParseAlternation(vP);
+    SkipWs(vP);
+    if vP.Pos <= vP.Len and not (IsAlpha(Cur(vP)) and PeekIsDefinedAs(vP.Str, vP.Pos, vP.Len)) then
+      SyntaxError(vP.Str, vP.Pos, 'unexpected "' || Cur(vP) || '"');
+    end if;
+
+    vKey := upper(vName);
+    if vIndex.exists(vKey) then
+      if not vIncremental then
+        SyntaxError(vP.Str, vNamePos, 'rule "' || vName || '" is already defined (use "=/" to add alternatives)');
+      end if;
+      vIdx := vIndex(vKey);
+      for i in 1..vBranches.count
+      loop
+        vDefs(vIdx).Branches.extend;
+        vDefs(vIdx).Branches(vDefs(vIdx).Branches.count) := vBranches(i);
+      end loop;
+      vDefs(vIdx).Cmt := AppendText(vDefs(vIdx).Cmt, vP.Cmt);
+    else
+      if vIncremental then
+        SyntaxError(vP.Str, vNamePos, 'rule "' || vName || '" cannot be extended with "=/" before it is defined');
+      end if;
+      vIdx := vDefs.count + 1;
+      vDefs(vIdx).RuleName := vName;
+      vDefs(vIdx).Branches := vBranches;
+      vDefs(vIdx).Cmt      := vP.Cmt;
+      vIndex(vKey)         := vIdx;
+    end if;
+  end loop;
+
+  for i in 1..vDefs.count
+  loop
+    vNode           := MakeAlternative(vDefs(i).Branches);
+    vNode.NODE_NAME := vDefs(i).RuleName;
+    vResult.extend;
+    vResult(vResult.count) := TY_ABNF_Rule(vDefs(i).RuleName, vDefs(i).Cmt, vNode);
+  end loop;
+
+  return vResult;
+end ParseGrammar;
+
+------------------------------------------------------------------------------
+-- PL/SQL code generation
+------------------------------------------------------------------------------
+-- A PL/SQL expression for pText; control characters become chr() calls
+function PlsqlString(pText varchar2) return varchar2 is
+  vResult varchar2(32767);
+  vChunk  varchar2(32767);
+  vCh     varchar2(1);
+
+  procedure Flush is
+  begin
+    if vChunk is not null then
+      vResult := vResult || case when vResult is not null then ' || ' end
+                 || '''' || replace(vChunk, '''', '''''') || '''';
+      vChunk  := null;
+    end if;
+  end Flush;
+begin
+  if pText is null then
+    vResult := 'null';
+  else
+    for i in 1..length(pText)
+    loop
+      vCh := substr(pText, i, 1);
+      if ascii(vCh) < 32 then
+        Flush;
+        vResult := vResult || case when vResult is not null then ' || ' end || 'chr(' || to_char(ascii(vCh)) || ')';
+      else
+        vChunk := vChunk || vCh;
+      end if;
+    end loop;
+    Flush;
   end if;
-end FlushRule;
+  return vResult;
+end PlsqlString;
+
+function NodeToCode(pNode TY_ABNF_Node, pIndent integer) return varchar2;
+
+function NodeListToCode(pList TY_ABNF_NodeList, pIndent integer) return varchar2 is
+  vInd    varchar2(200) := rpad(' ', pIndent);
+  vResult varchar2(32767) := 'TY_ABNF_NodeList(';
+begin
+  for i in 1..pList.count
+  loop
+    vResult := vResult || LF || vInd || case when i = 1 then '  ' else ', ' end || NodeToCode(pList(i), pIndent + 2);
+  end loop;
+  return vResult || LF || vInd || ')';
+end NodeListToCode;
+
+function NodeToCode(pNode TY_ABNF_Node, pIndent integer) return varchar2 is
+  vInd    varchar2(200) := rpad(' ', pIndent);
+  vLit    TY_ABNF_Literal;
+  vRange  TY_ABNF_Range;
+  vProse  TY_ABNF_Prose;
+  vRef    TY_ABNF_RuleRef;
+  vSeq    TY_ABNF_Sequence;
+  vAlt    TY_ABNF_Alternative;
+  vRep    TY_ABNF_Repetition;
+  vResult varchar2(32767);
+begin
+  if pNode is null then
+    vResult := 'null';
+  elsif pNode is of (TY_ABNF_Literal) then
+    vLit := treat(pNode as TY_ABNF_Literal);
+    vResult := 'TY_ABNF_Literal(NODE_NAME => ' || PlsqlString(vLit.NODE_NAME)
+               || ', VALUE => ' || PlsqlString(vLit.VALUE)
+               || ', CASE_SENSITIVE => ' || PlsqlString(nvl(vLit.CASE_SENSITIVE, 'N')) || ')';
+  elsif pNode is of (TY_ABNF_Range) then
+    vRange := treat(pNode as TY_ABNF_Range);
+    vResult := 'TY_ABNF_Range(NODE_NAME => ' || PlsqlString(vRange.NODE_NAME)
+               || ', MIN_CODE => ' || to_char(vRange.MIN_CODE)
+               || ', MAX_CODE => ' || to_char(vRange.MAX_CODE) || ')';
+  elsif pNode is of (TY_ABNF_Prose) then
+    vProse := treat(pNode as TY_ABNF_Prose);
+    vResult := 'TY_ABNF_Prose(NODE_NAME => ' || PlsqlString(vProse.NODE_NAME)
+               || ', TEXT => ' || PlsqlString(vProse.TEXT) || ')';
+  elsif pNode is of (TY_ABNF_RuleRef) then
+    vRef := treat(pNode as TY_ABNF_RuleRef);
+    vResult := 'TY_ABNF_RuleRef(NODE_NAME => ' || PlsqlString(vRef.NODE_NAME)
+               || ', RULE_NAME => ' || PlsqlString(vRef.RULE_NAME) || ')';
+  elsif pNode is of (TY_ABNF_Sequence) then
+    vSeq := treat(pNode as TY_ABNF_Sequence);
+    vResult := 'TY_ABNF_Sequence(' || LF
+               || vInd || '  NODE_NAME   => ' || PlsqlString(vSeq.NODE_NAME) || LF
+               || vInd || ', CHILD_NODES => ' || NodeListToCode(vSeq.CHILD_NODES, pIndent + 2) || LF
+               || vInd || ')';
+  elsif pNode is of (TY_ABNF_Alternative) then
+    vAlt := treat(pNode as TY_ABNF_Alternative);
+    vResult := 'TY_ABNF_Alternative(' || LF
+               || vInd || '  NODE_NAME   => ' || PlsqlString(vAlt.NODE_NAME) || LF
+               || vInd || ', CHILD_NODES => ' || NodeListToCode(vAlt.CHILD_NODES, pIndent + 2) || LF
+               || vInd || ')';
+  elsif pNode is of (TY_ABNF_Repetition) then
+    vRep := treat(pNode as TY_ABNF_Repetition);
+    vResult := 'TY_ABNF_Repetition(' || LF
+               || vInd || '  NODE_NAME  => ' || PlsqlString(vRep.NODE_NAME) || LF
+               || vInd || ', MIN_OCCURS => ' || nvl(to_char(vRep.MIN_OCCURS), 'null') || LF
+               || vInd || ', MAX_OCCURS => ' || nvl(to_char(vRep.MAX_OCCURS), 'null') || LF
+               || vInd || ', CHILD_NODE => ' || NodeToCode(vRep.CHILD_NODE, pIndent + 2) || LF
+               || vInd || ')';
+  else
+    raise_application_error(-20111, 'Cannot generate code for a node of an unsupported type');
+  end if;
+  return vResult;
+end NodeToCode;
+
+procedure AppendClob(pClob in out nocopy clob, pText varchar2) is
+begin
+  if pText is not null then
+    DBMS_LOB.WRITEAPPEND(pClob, length(pText), pText);
+  end if;
+end AppendClob;
 
 ------------------------------------------------------------------------------
 -- GeneratePLSQLFromABNF
 ------------------------------------------------------------------------------
 function GeneratePLSQLFromABNF(pGrammar varchar2) return clob is
-  vClob            clob;
-  vLine            varchar2(32767);
-  vCleanLine       varchar2(32767);
-  vEqPos           integer;
-  vStart           integer := 1;
-  vEnd             integer;
-  vLen             integer;
-  vCurrentRuleName varchar2(100) := null;
-  vCurrentRuleRhs  varchar2(32767) := null;
-  vIncName         varchar2(100);
-  vIncRhs          varchar2(32767);
+  vClob     clob;
+  vRules    TY_ABNF_RuleSet;
+  vComment  varchar2(4000);
+  vLineEnd  integer;
+  vLineFrom integer;
 begin
   DBMS_LOB.CREATETEMPORARY(vClob, True);
-  if pGrammar is null then
-    return vClob;
+  if pGrammar is not null then
+    vRules := ParseGrammar(pGrammar);
+
+    AppendClob(vClob, '-- Generated by P_ABNF_Engine.GeneratePLSQLFromABNF' || LF);
+    AppendClob(vClob, 'function GetRuleSet return TY_ABNF_RuleSet is' || LF);
+    AppendClob(vClob, 'begin' || LF);
+    AppendClob(vClob, '  return TY_ABNF_RuleSet(' || LF);
+
+    for i in 1..vRules.count
+    loop
+      -- Grammar comments become PL/SQL comments
+      vComment  := vRules(i).COMMENT_TEXT;
+      vLineFrom := 1;
+      while vComment is not null and vLineFrom <= length(vComment)
+      loop
+        vLineEnd := instr(vComment, LF, vLineFrom);
+        if vLineEnd = 0 then
+          vLineEnd := length(vComment) + 1;
+        end if;
+        AppendClob(vClob, '    -- ' || substr(vComment, vLineFrom, vLineEnd - vLineFrom) || LF);
+        vLineFrom := vLineEnd + 1;
+      end loop;
+
+      AppendClob(vClob, case when i = 1 then '    ' else '  , ' end || 'TY_ABNF_Rule(' || LF);
+      AppendClob(vClob, '      RULE_NAME    => ' || PlsqlString(vRules(i).RULE_NAME) || LF);
+      AppendClob(vClob, '    , COMMENT_TEXT => ' || PlsqlString(vRules(i).COMMENT_TEXT) || LF);
+      AppendClob(vClob, '    , RULE_NODE    => ' || NodeToCode(vRules(i).RULE_NODE, 6) || LF);
+      AppendClob(vClob, '    )' || LF);
+    end loop;
+
+    AppendClob(vClob, '  );' || LF);
+    AppendClob(vClob, 'end GetRuleSet;' || LF);
   end if;
-
-  vLen := length(pGrammar);
-
-  while vStart <= vLen loop
-    vEnd := instr(pGrammar, chr(10), vStart);
-    if vEnd = 0 then
-      vEnd := vLen + 1;
-    end if;
-
-    if vEnd > vStart then
-      vLine := substr(pGrammar, vStart, vEnd - vStart);
-    else
-      vLine := null;
-    end if;
-
-    vLine := replace(vLine, chr(13), '');
-    vCleanLine := CleanGrammarLine(vLine);
-
-    if length(vCleanLine) > 0 then
-      vEqPos := FindEqualsSign(vCleanLine);
-      if vEqPos > 0 then
-        if substr(vCleanLine, vEqPos + 1, 1) = '/' then
-          -- Incremental alternative (=/)
-          vIncName := trim(substr(vCleanLine, 1, vEqPos - 1));
-          vIncRhs  := trim(substr(vCleanLine, vEqPos + 2));
-          if lower(vIncName) = lower(vCurrentRuleName) then
-            vCurrentRuleRhs := vCurrentRuleRhs || ' / ' || vIncRhs;
-          else
-            FlushRule(vCurrentRuleName, vCurrentRuleRhs, vClob);
-            vCurrentRuleName := vIncName;
-            vCurrentRuleRhs  := vIncRhs;
-          end if;
-        else
-          -- New rule definition
-          FlushRule(vCurrentRuleName, vCurrentRuleRhs, vClob);
-          vCurrentRuleName := trim(substr(vCleanLine, 1, vEqPos - 1));
-          vCurrentRuleRhs  := trim(substr(vCleanLine, vEqPos + 1));
-        end if;
-      else
-        -- Continuation line for current rule
-        if vCurrentRuleName is not null then
-          vCurrentRuleRhs := vCurrentRuleRhs || ' ' || vCleanLine;
-        end if;
-      end if;
-    end if;
-
-    vStart := vEnd + 1;
-  end loop;
-
-  -- Flush the final accumulated rule
-  FlushRule(vCurrentRuleName, vCurrentRuleRhs, vClob);
-
   return vClob;
 end GeneratePLSQLFromABNF;
 
+------------------------------------------------------------------------------
+-- Tokenise
+------------------------------------------------------------------------------
+function Tokenise(
+           pRules       TY_ABNF_RuleSet
+         , pTokenRules  varchar2
+         , pInput       varchar2
+         ) return TY_ABNF_TokenList pipelined is
+  vRules     TY_ABNF_RuleSet := WithCore(pRules);
+  vNames     TY_ABNF_StrList := TY_ABNF_StrList();
+  vRefs      TY_ABNF_NodeList := TY_ABNF_NodeList();
+  vCtx       TY_ABNF_RuleContext;
+  vEnds      TY_ABNF_PosList;
+  vLen       integer := nvl(length(pInput), 0);
+  vPos       integer := 1;
+  vSeq       integer := 0;
+  vBestLen   integer;
+  vBestIdx   integer;
+  vTokenLen  integer;
+  vLine      integer;
+  vColumn    integer;
+  vTried     varchar2(4000);
+  vFrom      integer := 1;
+  vComma     integer;
+begin
+  -- The rules to try, in priority order
+  if pTokenRules is null then
+    if pRules is not null then
+      for i in 1..pRules.count
+      loop
+        vNames.extend;
+        vNames(vNames.count) := pRules(i).RULE_NAME;
+      end loop;
+    end if;
+  else
+    while vFrom <= length(pTokenRules) + 1
+    loop
+      vComma := instr(pTokenRules, ',', vFrom);
+      if vComma = 0 then
+        vComma := length(pTokenRules) + 1;
+      end if;
+      if trim(substr(pTokenRules, vFrom, vComma - vFrom)) is not null then
+        vNames.extend;
+        vNames(vNames.count) := trim(substr(pTokenRules, vFrom, vComma - vFrom));
+      end if;
+      vFrom := vComma + 1;
+    end loop;
+  end if;
+
+  for i in 1..vNames.count
+  loop
+    vRefs.extend;
+    vRefs(vRefs.count) := TY_ABNF_RuleRef(NODE_NAME => null, RULE_NAME => vNames(i));
+    vTried := substr(vTried || case when i > 1 then ', ' end || vNames(i), 1, 4000);
+  end loop;
+
+  while vPos <= vLen
+  loop
+    vBestLen := 0;
+    vBestIdx := 0;
+    for i in 1..vRefs.count
+    loop
+      -- a fresh context each time, so one rule's failures do not affect the next
+      vCtx  := TY_ABNF_RuleContext.NewContext(vRules);
+      vEnds := vRefs(i).MatchInput(pInput => pInput, pOffset => vPos, pCtx => vCtx);
+      vTokenLen := 0;
+      for j in 1..vEnds.count
+      loop
+        vTokenLen := greatest(vTokenLen, vEnds(j) - vPos);
+      end loop;
+      if vTokenLen > vBestLen then
+        vBestLen := vTokenLen;
+        vBestIdx := i;
+      end if;
+    end loop;
+
+    if vBestIdx = 0 then
+      LineAndColumn(pInput, vPos, vLine, vColumn);
+      raise_application_error(
+        -20120
+      , 'Line ' || to_char(vLine) || ', column ' || to_char(vColumn) || ': found "'
+        || TY_ABNF_Context.Escape(substr(pInput, vPos, 1)) || '", which does not start any token. Rules tried: '
+        || nvl(vTried, '(none)')
+      );
+    end if;
+
+    vSeq := vSeq + 1;
+    pipe row(TY_ABNF_Token(vSeq, vNames(vBestIdx), vPos, vBestLen, substr(pInput, vPos, least(vBestLen, 4000))));
+    vPos := vPos + vBestLen;
+  end loop;
+
+  return;
+end Tokenise;
+
+function Tokenise(
+           pGrammar     varchar2
+         , pTokenRules  varchar2
+         , pInput       varchar2
+         ) return TY_ABNF_TokenList pipelined is
+begin
+  for rec in (
+    select t.SEQ, t.RULE_NAME, t.START_POS, t.TOKEN_LENGTH, t.TEXT
+    from table(Tokenise(ParseGrammar(pGrammar), pTokenRules, pInput)) t
+    order by t.SEQ
+  )
+  loop
+    pipe row(TY_ABNF_Token(rec.SEQ, rec.RULE_NAME, rec.START_POS, rec.TOKEN_LENGTH, rec.TEXT));
+  end loop;
+  return;
+end Tokenise;
+
+------------------------------------------------------------------------------
+-- ParseTree
+--
+-- Matching only reports where a node can end, so the tree is rebuilt by a second pass: Derive finds one way
+-- for a node to match exactly pPos..pEnd-1, adding a row for each user-defined rule on the way, and removes
+-- the rows again when a choice turns out to be a dead end.
+------------------------------------------------------------------------------
+-- The ends of a match, longest first, so the greedy reading is tried before the shorter ones
+function LongestFirst(pEnds TY_ABNF_PosList) return TY_ABNF_PosList is
+  vResult TY_ABNF_PosList;
+begin
+  select e.COLUMN_VALUE
+  bulk collect into vResult
+  from table(pEnds) e
+  order by e.COLUMN_VALUE desc;
+  return vResult;
+end LongestFirst;
+
+-- The name pName has in the grammar's own rules, or null if the grammar does not define it
+function UserRuleName(pUser TY_ABNF_RuleSet, pName varchar2) return varchar2 is
+  vResult varchar2(128);
+begin
+  if pUser is not null then
+    for i in 1..pUser.count
+    loop
+      if upper(pUser(i).RULE_NAME) = upper(pName) then
+        vResult := pUser(i).RULE_NAME;
+        exit;
+      end if;
+    end loop;
+  end if;
+  return vResult;
+end UserRuleName;
+
+procedure TrimRows(pRows in out nocopy TY_ABNF_ParseNodeList, pKeep integer) is
+begin
+  if pRows.count > pKeep then
+    pRows.trim(pRows.count - pKeep);
+  end if;
+end TrimRows;
+
+function Derive(
+           pNode   in     TY_ABNF_Node
+         , pInput  in     varchar2
+         , pPos    in     integer
+         , pEnd    in     integer
+         , pParent in     integer
+         , pDepth  in     integer
+         , pUser   in     TY_ABNF_RuleSet
+         , pCtx    in out nocopy TY_ABNF_RuleContext
+         , pRows   in out nocopy TY_ABNF_ParseNodeList
+         ) return boolean;
+
+-- Children pIdx.. of a sequence must cover pPos..pEnd-1
+function DeriveSequence(
+           pChildren in     TY_ABNF_NodeList
+         , pIdx      in     integer
+         , pInput    in     varchar2
+         , pPos      in     integer
+         , pEnd      in     integer
+         , pParent   in     integer
+         , pDepth    in     integer
+         , pUser     in     TY_ABNF_RuleSet
+         , pCtx      in out nocopy TY_ABNF_RuleContext
+         , pRows     in out nocopy TY_ABNF_ParseNodeList
+         ) return boolean is
+  vEnds   TY_ABNF_PosList;
+  vSaved  integer;
+  vResult boolean := False;
+begin
+  if pChildren is null or pIdx > pChildren.count then
+    vResult := pPos = pEnd;
+  elsif pChildren(pIdx) is null then
+    vResult := DeriveSequence(pChildren, pIdx + 1, pInput, pPos, pEnd, pParent, pDepth, pUser, pCtx, pRows);
+  else
+    vEnds  := LongestFirst(pChildren(pIdx).MatchInput(pInput => pInput, pOffset => pPos, pCtx => pCtx));
+    vSaved := pRows.count;
+    for i in 1..vEnds.count
+    loop
+      if vEnds(i) <= pEnd
+         and Derive(pChildren(pIdx), pInput, pPos, vEnds(i), pParent, pDepth, pUser, pCtx, pRows)
+         and DeriveSequence(pChildren, pIdx + 1, pInput, vEnds(i), pEnd, pParent, pDepth, pUser, pCtx, pRows) then
+        vResult := True;
+        exit;
+      end if;
+      TrimRows(pRows, vSaved);
+    end loop;
+  end if;
+  return vResult;
+end DeriveSequence;
+
+-- pCount repeats are done; the rest must cover pPos..pEnd-1
+function DeriveRepetition(
+           pRep    in     TY_ABNF_Repetition
+         , pCount  in     integer
+         , pInput  in     varchar2
+         , pPos    in     integer
+         , pEnd    in     integer
+         , pParent in     integer
+         , pDepth  in     integer
+         , pUser   in     TY_ABNF_RuleSet
+         , pCtx    in out nocopy TY_ABNF_RuleContext
+         , pRows   in out nocopy TY_ABNF_ParseNodeList
+         ) return boolean is
+  vMin    integer := nvl(pRep.MIN_OCCURS, 0);
+  vEnds   TY_ABNF_PosList;
+  vSaved  integer;
+  vResult boolean := False;
+begin
+  if pPos = pEnd and pCount >= vMin then
+    vResult := True;
+  elsif pRep.CHILD_NODE is not null and (pRep.MAX_OCCURS is null or pCount < pRep.MAX_OCCURS) then
+    vEnds  := LongestFirst(pRep.CHILD_NODE.MatchInput(pInput => pInput, pOffset => pPos, pCtx => pCtx));
+    vSaved := pRows.count;
+    for i in 1..vEnds.count
+    loop
+      -- an empty repeat is only useful to reach the minimum count
+      if vEnds(i) <= pEnd and (vEnds(i) > pPos or pCount < vMin)
+         and Derive(pRep.CHILD_NODE, pInput, pPos, vEnds(i), pParent, pDepth, pUser, pCtx, pRows)
+         and DeriveRepetition(pRep, pCount + 1, pInput, vEnds(i), pEnd, pParent, pDepth, pUser, pCtx, pRows) then
+        vResult := True;
+        exit;
+      end if;
+      TrimRows(pRows, vSaved);
+    end loop;
+  end if;
+  return vResult;
+end DeriveRepetition;
+
+function Derive(
+           pNode   in     TY_ABNF_Node
+         , pInput  in     varchar2
+         , pPos    in     integer
+         , pEnd    in     integer
+         , pParent in     integer
+         , pDepth  in     integer
+         , pUser   in     TY_ABNF_RuleSet
+         , pCtx    in out nocopy TY_ABNF_RuleContext
+         , pRows   in out nocopy TY_ABNF_ParseNodeList
+         ) return boolean is
+  vSaved    integer := pRows.count;
+  vAlt      TY_ABNF_Alternative;
+  vEnds     TY_ABNF_PosList;
+  vRef      TY_ABNF_RuleRef;
+  vTarget   TY_ABNF_Node;
+  vRuleName varchar2(128);
+  vId       integer;
+  vResult   boolean := False;
+begin
+  if pNode is null then
+    vResult := pPos = pEnd;
+  elsif pNode is of (TY_ABNF_Sequence) then
+    vResult := DeriveSequence(
+                 treat(pNode as TY_ABNF_Sequence).CHILD_NODES, 1, pInput, pPos, pEnd, pParent, pDepth, pUser, pCtx, pRows
+               );
+  elsif pNode is of (TY_ABNF_Alternative) then
+    vAlt := treat(pNode as TY_ABNF_Alternative);
+    if vAlt.CHILD_NODES is not null then
+      for i in 1..vAlt.CHILD_NODES.count
+      loop
+        vResult := Derive(vAlt.CHILD_NODES(i), pInput, pPos, pEnd, pParent, pDepth, pUser, pCtx, pRows);
+        exit when vResult;
+        TrimRows(pRows, vSaved);
+      end loop;
+    end if;
+  elsif pNode is of (TY_ABNF_Repetition) then
+    vResult := DeriveRepetition(
+                 treat(pNode as TY_ABNF_Repetition), 0, pInput, pPos, pEnd, pParent, pDepth, pUser, pCtx, pRows
+               );
+  elsif pNode is of (TY_ABNF_RuleRef) then
+    vRef      := treat(pNode as TY_ABNF_RuleRef);
+    vRuleName := UserRuleName(pUser, vRef.RULE_NAME);
+    if vRuleName is null then
+      -- a core rule: it only has to match, it is not listed
+      vEnds   := vRef.MatchInput(pInput => pInput, pOffset => pPos, pCtx => pCtx);
+      vResult := pEnd member of vEnds;
+    else
+      vTarget := pCtx.FindRule(vRuleName);
+      pRows.extend;
+      vId := pRows.count;
+      pRows(vId) := TY_ABNF_ParseNode(
+                      vId, pParent, pDepth, vRuleName, pPos, pEnd - pPos
+                    , substr(pInput, pPos, least(pEnd - pPos, 4000))
+                    );
+      vResult := Derive(vTarget, pInput, pPos, pEnd, vId, pDepth + 1, pUser, pCtx, pRows);
+    end if;
+  else
+    -- literal, range or prose
+    vEnds   := pNode.MatchInput(pInput => pInput, pOffset => pPos, pCtx => pCtx);
+    vResult := pEnd member of vEnds;
+  end if;
+
+  if not vResult then
+    TrimRows(pRows, vSaved);
+  end if;
+  return vResult;
+end Derive;
+
+function ParseTree(
+           pRules       TY_ABNF_RuleSet
+         , pStartRule   varchar2
+         , pInput       varchar2
+         ) return TY_ABNF_ParseNodeList pipelined is
+  vCtx    TY_ABNF_RuleContext := TY_ABNF_RuleContext.NewContext(WithCore(pRules));
+  vStart  TY_ABNF_Node := StartNode(pRules, pStartRule);
+  vEnds   TY_ABNF_PosList;
+  vLen    integer := nvl(length(pInput), 0);
+  vRows   TY_ABNF_ParseNodeList := TY_ABNF_ParseNodeList();
+begin
+  if vStart is null then
+    raise_application_error(-20121, 'There is no start rule to parse with');
+  end if;
+
+  -- also raises for undefined and left-recursive rules, before any tree is built
+  vEnds := vStart.MatchInput(pInput => pInput, pOffset => 1, pCtx => vCtx);
+  if not ((vLen + 1) member of vEnds) then
+    raise_application_error(-20121, 'Input does not match: ' || ExplainMismatch(pRules, pStartRule, pInput));
+  end if;
+
+  if not Derive(vStart, pInput, 1, vLen + 1, null, 0, pRules, vCtx, vRows) then
+    raise_application_error(-20121, 'Parse tree could not be built');
+  end if;
+
+  for i in 1..vRows.count
+  loop
+    pipe row(vRows(i));
+  end loop;
+  return;
+end ParseTree;
+
+function ParseTree(
+           pGrammar     varchar2
+         , pStartRule   varchar2
+         , pInput       varchar2
+         ) return TY_ABNF_ParseNodeList pipelined is
+begin
+  for rec in (
+    select t.NODE_ID, t.PARENT_ID, t.DEPTH, t.RULE_NAME, t.START_POS, t.NODE_LENGTH, t.TEXT
+    from table(ParseTree(ParseGrammar(pGrammar), pStartRule, pInput)) t
+    order by t.NODE_ID
+  )
+  loop
+    pipe row(TY_ABNF_ParseNode(
+               rec.NODE_ID, rec.PARENT_ID, rec.DEPTH, rec.RULE_NAME, rec.START_POS, rec.NODE_LENGTH, rec.TEXT
+             ));
+  end loop;
+  return;
+end ParseTree;
+
 end P_ABNF_Engine;
 /
-

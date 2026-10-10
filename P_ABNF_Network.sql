@@ -5,7 +5,25 @@ create or replace
 package P_ABNF_Network is
 
 function GetIPv4OctetRule return TY_ABNF_Alternative;
-function GetAddrSpecRule return TY_ABNF_Sequence;
+function GetIPv6AddressRule return TY_ABNF_Alternative;
+function GetEmailAddrSpecRule return TY_ABNF_Sequence;
+
+-- The same grammars as named rule sets, for P_ABNF_Engine.ParseTree / Tokenise. Start rules: dec-octet,
+-- IPv4address, IPv6address and addr-spec (the first rule in each set is the one to start from).
+--   select * from table(P_ABNF_Engine.ParseTree(P_ABNF_Network.GetEmailRuleSet, 'addr-spec', 'a.b@example.com'))
+function GetIPv4RuleSet return TY_ABNF_RuleSet;
+function GetIPv6RuleSet return TY_ABNF_RuleSet;
+function GetEmailRuleSet return TY_ABNF_RuleSet;
+
+function ValidateIPv6(pAddress varchar2) return boolean;
+
+procedure ValidateIPv6(
+            pAddress        in  varchar2
+          , pIsValid        out boolean
+          , pErrorPosition  out integer
+          , pFailedNodeName out varchar2
+          , pErrorMessage   out varchar2
+          );
 
 function ValidateEmail(pEmail varchar2) return boolean;
 
@@ -76,6 +94,119 @@ begin
              );
   return vResult;
 end GetIPv4OctetRule;
+
+------------------------------------------------------------------------------
+-- Private helpers for the IPv6 rule
+------------------------------------------------------------------------------
+function Lit(pText varchar2) return TY_ABNF_Literal is
+begin
+  return TY_ABNF_Literal(NODE_NAME => null, VALUE => pText);
+end Lit;
+
+function Rep(pMin integer, pMax integer, pNode TY_ABNF_Node) return TY_ABNF_Repetition is
+begin
+  return TY_ABNF_Repetition(NODE_NAME => null, MIN_OCCURS => pMin, MAX_OCCURS => pMax, CHILD_NODE => pNode);
+end Rep;
+
+function Seq(pName varchar2, pNodes TY_ABNF_NodeList) return TY_ABNF_Sequence is
+begin
+  return TY_ABNF_Sequence(NODE_NAME => pName, CHILD_NODES => pNodes);
+end Seq;
+
+-- h16 = 1*4HEXDIG
+function GetH16Rule return TY_ABNF_Repetition is
+begin
+  return TY_ABNF_Repetition(NODE_NAME => 'h16', MIN_OCCURS => 1, MAX_OCCURS => 4, CHILD_NODE => P_ABNF_Engine.CoreHexDig());
+end GetH16Rule;
+
+-- IPv4address = dec-octet "." dec-octet "." dec-octet "." dec-octet
+function GetIPv4AddressRule return TY_ABNF_Sequence is
+begin
+  return Seq('IPv4address', TY_ABNF_NodeList(
+                              GetIPv4OctetRule(), Lit('.')
+                            , GetIPv4OctetRule(), Lit('.')
+                            , GetIPv4OctetRule(), Lit('.')
+                            , GetIPv4OctetRule()
+                            ));
+end GetIPv4AddressRule;
+
+-- ls32 = ( h16 ":" h16 ) / IPv4address
+function GetLs32Rule return TY_ABNF_Alternative is
+begin
+  return TY_ABNF_Alternative(
+           NODE_NAME   => 'ls32'
+         , CHILD_NODES => TY_ABNF_NodeList(
+                            Seq(null, TY_ABNF_NodeList(GetH16Rule(), Lit(':'), GetH16Rule()))
+                          , GetIPv4AddressRule()
+                          )
+         );
+end GetLs32Rule;
+
+-- h16 ":"
+function GetH16ColonRule return TY_ABNF_Sequence is
+begin
+  return Seq(null, TY_ABNF_NodeList(GetH16Rule(), Lit(':')));
+end GetH16ColonRule;
+
+-- [ *n( h16 ":" ) h16 ] "::" followed by pTail (pMaxColonGroups null means just [ h16 ])
+function GetCompressedForm(pMaxColonGroups integer, pTail TY_ABNF_NodeList) return TY_ABNF_Sequence is
+  vNodes  TY_ABNF_NodeList := TY_ABNF_NodeList();
+begin
+  if pMaxColonGroups = 0 then
+    vNodes.extend;
+    vNodes(vNodes.count) := Rep(0, 1, GetH16Rule());
+  else
+    vNodes.extend;
+    vNodes(vNodes.count) := Rep(0, 1, Seq(null, TY_ABNF_NodeList(Rep(0, pMaxColonGroups, GetH16ColonRule()), GetH16Rule())));
+  end if;
+
+  vNodes.extend;
+  vNodes(vNodes.count) := Lit('::');
+  for i in 1..pTail.count
+  loop
+    vNodes.extend;
+    vNodes(vNodes.count) := pTail(i);
+  end loop;
+
+  return Seq(null, vNodes);
+end GetCompressedForm;
+
+------------------------------------------------------------------------------
+-- IPv6 address (RFC 3986 section 3.2.2, RFC 4291 section 2.2)
+--
+-- IPv6address =                            6( h16 ":" ) ls32
+--             /                       "::" 5( h16 ":" ) ls32
+--             / [               h16 ] "::" 4( h16 ":" ) ls32
+--             / [ *1( h16 ":" ) h16 ] "::" 3( h16 ":" ) ls32
+--             / [ *2( h16 ":" ) h16 ] "::" 2( h16 ":" ) ls32
+--             / [ *3( h16 ":" ) h16 ] "::"    h16 ":"   ls32
+--             / [ *4( h16 ":" ) h16 ] "::"              ls32
+--             / [ *5( h16 ":" ) h16 ] "::"              h16
+--             / [ *6( h16 ":" ) h16 ] "::"
+-- h16         = 1*4HEXDIG
+-- ls32        = ( h16 ":" h16 ) / IPv4address
+--
+-- The alternatives overlap, so this only validates with a backtracking matcher.
+------------------------------------------------------------------------------
+function GetIPv6AddressRule return TY_ABNF_Alternative is
+  vResult TY_ABNF_Alternative;
+begin
+  vResult := TY_ABNF_Alternative(
+               NODE_NAME   => 'IPv6address'
+             , CHILD_NODES => TY_ABNF_NodeList(
+                                Seq(null, TY_ABNF_NodeList(Rep(6, 6, GetH16ColonRule()), GetLs32Rule()))
+                              , Seq(null, TY_ABNF_NodeList(Lit('::'), Rep(5, 5, GetH16ColonRule()), GetLs32Rule()))
+                              , GetCompressedForm(0, TY_ABNF_NodeList(Rep(4, 4, GetH16ColonRule()), GetLs32Rule()))
+                              , GetCompressedForm(1, TY_ABNF_NodeList(Rep(3, 3, GetH16ColonRule()), GetLs32Rule()))
+                              , GetCompressedForm(2, TY_ABNF_NodeList(Rep(2, 2, GetH16ColonRule()), GetLs32Rule()))
+                              , GetCompressedForm(3, TY_ABNF_NodeList(GetH16ColonRule(), GetLs32Rule()))
+                              , GetCompressedForm(4, TY_ABNF_NodeList(GetLs32Rule()))
+                              , GetCompressedForm(5, TY_ABNF_NodeList(GetH16Rule()))
+                              , GetCompressedForm(6, TY_ABNF_NodeList())
+                              )
+             );
+  return vResult;
+end GetIPv6AddressRule;
 
 ------------------------------------------------------------------------------
 -- Private Helper: Returns a rule for ABNF quoted-pair (%d92 VCHAR / WSP)
@@ -317,10 +448,10 @@ begin
 end GetDomainRule;
 
 ------------------------------------------------------------------------------
--- GetAddrSpecRule: Returns the full RFC 5322 addr-spec rule
+-- GetEmailAddrSpecRule: Returns the full RFC 5322 addr-spec rule
 -- addr-spec = local-part "@" domain
 ------------------------------------------------------------------------------
-function GetAddrSpecRule return TY_ABNF_Sequence is
+function GetEmailAddrSpecRule return TY_ABNF_Sequence is
   vResult TY_ABNF_Sequence;
 begin
   vResult := TY_ABNF_Sequence(
@@ -332,7 +463,57 @@ begin
                               )
              );
   return vResult;
-end GetAddrSpecRule;
+end GetEmailAddrSpecRule;
+
+------------------------------------------------------------------------------
+-- Rule sets (named rules, so ParseTree can report them). Same grammars as the node builders above.
+------------------------------------------------------------------------------
+function GetIPv4RuleSet return TY_ABNF_RuleSet is
+begin
+  return P_ABNF_Engine.ParseGrammar(q'<
+IPv4address = dec-octet "." dec-octet "." dec-octet "." dec-octet
+dec-octet   = "25" %x30-35 / "2" %x30-34 DIGIT / "1" 2DIGIT / %x31-39 DIGIT / DIGIT
+>');
+end GetIPv4RuleSet;
+
+function GetIPv6RuleSet return TY_ABNF_RuleSet is
+begin
+  return P_ABNF_Engine.ParseGrammar(q'<
+IPv6address =                            6( h16 ":" ) ls32
+            /                       "::" 5( h16 ":" ) ls32
+            / [               h16 ] "::" 4( h16 ":" ) ls32
+            / [ *1( h16 ":" ) h16 ] "::" 3( h16 ":" ) ls32
+            / [ *2( h16 ":" ) h16 ] "::" 2( h16 ":" ) ls32
+            / [ *3( h16 ":" ) h16 ] "::"    h16 ":"   ls32
+            / [ *4( h16 ":" ) h16 ] "::"              ls32
+            / [ *5( h16 ":" ) h16 ] "::"              h16
+            / [ *6( h16 ":" ) h16 ] "::"
+h16         = 1*4HEXDIG
+ls32        = ( h16 ":" h16 ) / IPv4address
+IPv4address = dec-octet "." dec-octet "." dec-octet "." dec-octet
+dec-octet   = "25" %x30-35 / "2" %x30-34 DIGIT / "1" 2DIGIT / %x31-39 DIGIT / DIGIT
+>');
+end GetIPv6RuleSet;
+
+function GetEmailRuleSet return TY_ABNF_RuleSet is
+begin
+  return P_ABNF_Engine.ParseGrammar(q'<
+addr-spec      = local-part "@" domain
+local-part     = dot-atom-text / quoted-string
+domain         = dot-atom-text / domain-literal
+dot-atom-text  = 1*atext *("." 1*atext)
+atext          = ALPHA / DIGIT / "!" / "#" / "$" / "%" / "&" / "'" / "*" / "+" / "-"
+               / "/" / "=" / "?" / "^" / "_" / "`" / "{" / "|" / "}" / "~"
+quoted-string  = DQUOTE *qcontent DQUOTE
+qcontent       = qtext / WSP / quoted-pair
+qtext          = %d33 / %d35-91 / %d93-126
+quoted-pair    = "\" (VCHAR / WSP)
+domain-literal = "[" (IPv4address / *dtext) "]"
+dtext          = %d33-90 / %d94-126
+IPv4address    = dec-octet "." dec-octet "." dec-octet "." dec-octet
+dec-octet      = "25" %x30-35 / "2" %x30-34 DIGIT / "1" 2DIGIT / %x31-39 DIGIT / DIGIT
+>');
+end GetEmailRuleSet;
 
 ------------------------------------------------------------------------------
 -- ValidateEmail (Function overload)
@@ -341,7 +522,7 @@ function ValidateEmail(pEmail varchar2) return boolean is
   vResult boolean := False;
 begin
   vResult := P_ABNF_Engine.ValidateInput(
-               pNode  => GetAddrSpecRule()
+               pNode  => GetEmailAddrSpecRule()
              , pInput => pEmail
              );
   return vResult;
@@ -359,7 +540,7 @@ procedure ValidateEmail(
           ) is
 begin
   P_ABNF_Engine.ValidateInput(
-    pNode           => GetAddrSpecRule()
+    pNode           => GetEmailAddrSpecRule()
   , pInput          => pEmail
   , pIsValid        => pIsValid
   , pErrorPosition  => pErrorPosition
@@ -367,6 +548,40 @@ begin
   , pErrorMessage   => pErrorMessage
   );
 end ValidateEmail;
+
+------------------------------------------------------------------------------
+-- ValidateIPv6 (Function overload)
+------------------------------------------------------------------------------
+function ValidateIPv6(pAddress varchar2) return boolean is
+  vResult boolean := False;
+begin
+  vResult := P_ABNF_Engine.ValidateInput(
+               pNode  => GetIPv6AddressRule()
+             , pInput => pAddress
+             );
+  return vResult;
+end ValidateIPv6;
+
+------------------------------------------------------------------------------
+-- ValidateIPv6 (Procedure overload)
+------------------------------------------------------------------------------
+procedure ValidateIPv6(
+            pAddress        in  varchar2
+          , pIsValid        out boolean
+          , pErrorPosition  out integer
+          , pFailedNodeName out varchar2
+          , pErrorMessage   out varchar2
+          ) is
+begin
+  P_ABNF_Engine.ValidateInput(
+    pNode           => GetIPv6AddressRule()
+  , pInput          => pAddress
+  , pIsValid        => pIsValid
+  , pErrorPosition  => pErrorPosition
+  , pFailedNodeName => pFailedNodeName
+  , pErrorMessage   => pErrorMessage
+  );
+end ValidateIPv6;
 
 end P_ABNF_Network;
 /
