@@ -15,6 +15,13 @@ function GetIPv4RuleSet return TY_ABNF_RuleSet;
 function GetIPv6RuleSet return TY_ABNF_RuleSet;
 function GetEmailRuleSet return TY_ABNF_RuleSet;
 
+-- RFC 3986 URI grammar. Includes the IPv6 rule set (IPv6address, h16, ls32, IPv4address, dec-octet) for IP-literal.
+-- Start rules: URI (the first rule), URI-reference, absolute-URI, relative-ref.
+function GetUriRuleSet return TY_ABNF_RuleSet;
+
+-- pStartRule: URI, URI-reference, absolute-URI or relative-ref
+function ValidateUri(pUri varchar2, pStartRule varchar2 default 'URI') return boolean;
+
 function ValidateIPv6(pAddress varchar2) return boolean;
 
 procedure ValidateIPv6(
@@ -514,6 +521,79 @@ IPv4address    = dec-octet "." dec-octet "." dec-octet "." dec-octet
 dec-octet      = "25" %x30-35 / "2" %x30-34 DIGIT / "1" 2DIGIT / %x31-39 DIGIT / DIGIT
 >');
 end GetEmailRuleSet;
+
+-- RFC 3986. The IP address rules (IPv6address, h16, ls32, IPv4address, dec-octet) come from GetIPv6RuleSet.
+function GetUriRuleSet return TY_ABNF_RuleSet is
+  vResult TY_ABNF_RuleSet;
+  vIp     TY_ABNF_RuleSet := GetIPv6RuleSet();
+begin
+  vResult := P_ABNF_Engine.ParseGrammar(q'<
+URI           = scheme ":" hier-part [ "?" query ] [ "#" fragment ]
+hier-part     = "//" authority path-abempty
+              / path-absolute
+              / path-rootless
+              / path-empty
+URI-reference = URI / relative-ref
+absolute-URI  = scheme ":" hier-part [ "?" query ]
+relative-ref  = relative-part [ "?" query ] [ "#" fragment ]
+relative-part = "//" authority path-abempty
+              / path-absolute
+              / path-noscheme
+              / path-empty
+scheme        = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )
+authority     = [ userinfo "@" ] host [ ":" port ]
+userinfo      = *( unreserved / pct-encoded / sub-delims / ":" )
+host          = IP-literal / IPv4address / reg-name
+port          = *DIGIT
+IP-literal    = "[" ( IPv6address / IPvFuture ) "]"
+IPvFuture     = "v" 1*HEXDIG "." 1*( unreserved / sub-delims / ":" )
+reg-name      = *( unreserved / pct-encoded / sub-delims )
+path          = path-abempty    ; begins with "/" or is empty
+              / path-absolute   ; begins with "/" but not "//"
+              / path-noscheme   ; begins with a non-colon segment
+              / path-rootless   ; begins with a segment
+              / path-empty      ; zero characters
+path-abempty  = *( "/" segment )
+path-absolute = "/" [ segment-nz *( "/" segment ) ]
+path-noscheme = segment-nz-nc *( "/" segment )
+path-rootless = segment-nz *( "/" segment )
+path-empty    = 0<pchar>
+segment       = *pchar
+segment-nz    = 1*pchar
+segment-nz-nc = 1*( unreserved / pct-encoded / sub-delims / "@" ) ; non-zero-length segment without any colon ":"
+pchar         = unreserved / pct-encoded / sub-delims / ":" / "@"
+query         = *( pchar / "/" / "?" )
+fragment      = *( pchar / "/" / "?" )
+pct-encoded   = "%" HEXDIG HEXDIG
+unreserved    = ALPHA / DIGIT / "-" / "." / "_" / "~"
+reserved      = gen-delims / sub-delims
+gen-delims    = ":" / "/" / "?" / "#" / "[" / "]" / "@"
+sub-delims    = "!" / "$" / "&" / "'" / "(" / ")"
+              / "*" / "+" / "," / ";" / "="
+>');
+
+  for i in 1..vIp.count
+  loop
+    vResult.extend;
+    vResult(vResult.count) := vIp(i);
+  end loop;
+
+  return vResult;
+end GetUriRuleSet;
+
+------------------------------------------------------------------------------
+-- ValidateUri
+------------------------------------------------------------------------------
+function ValidateUri(pUri varchar2, pStartRule varchar2 default 'URI') return boolean is
+  vResult boolean := False;
+begin
+  vResult := P_ABNF_Engine.ValidateInput(
+               pRules     => GetUriRuleSet()
+             , pStartRule => pStartRule
+             , pInput     => pUri
+             );
+  return vResult;
+end ValidateUri;
 
 ------------------------------------------------------------------------------
 -- ValidateEmail (Function overload)

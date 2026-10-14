@@ -60,10 +60,37 @@ procedure RuleSetsAgree;
 --%test(Email rule set parses an address into local-part and domain)
 procedure EmailParseTree;
 
+------------------------------------------------------------------------------
+-- URI
+------------------------------------------------------------------------------
+--%test(Valid URIs: hierarchical, rootless and empty paths)
+procedure UriValid;
+
+--%test(Valid URIs with an IPv4, IPv6 or IPvFuture host)
+procedure UriIpHosts;
+
+--%test(Invalid URIs)
+procedure UriInvalid;
+
+--%test(URI-reference accepts URIs and relative references)
+procedure UriReference;
+
+--%test(relative-ref and absolute-URI start rules)
+procedure UriStartRules;
+
+--%test(URI rule set parses a URI into its components)
+procedure UriParseTree;
+
+--%test(ExplainMismatch points at the invalid character in a URI)
+procedure UriExplains;
+
 end P_UT_ABNF_Network;
 /
 
 create or replace package body P_UT_ABNF_Network is
+
+-- Avoids a literal ampersand, which SQL*Plus would treat as a substitution variable
+AMPERSAND constant varchar2(1) := chr(38);
 
 procedure ExpectOctet(pInput varchar2, pExpected boolean) is
 begin
@@ -82,6 +109,11 @@ procedure ExpectEmail(pEmail varchar2, pExpected boolean) is
 begin
   ut.expect(P_ABNF_Network.ValidateEmail(pEmail), 'E-mail <' || pEmail || '>').to_equal(pExpected);
 end ExpectEmail;
+
+procedure ExpectUri(pUri varchar2, pStartRule varchar2, pExpected boolean) is
+begin
+  ut.expect(P_ABNF_Network.ValidateUri(pUri, pStartRule), pStartRule || ' <' || pUri || '>').to_equal(pExpected);
+end ExpectUri;
 
 ------------------------------------------------------------------------------
 -- IPv4 octet
@@ -319,6 +351,119 @@ begin
   ut.expect(vLocal).to_equal('"quoted\"quote"');
   ut.expect(vDomain).to_equal('example.com');
 end EmailParseTree;
+
+------------------------------------------------------------------------------
+-- URI
+------------------------------------------------------------------------------
+procedure UriValid is
+begin
+  ExpectUri('http://example.com', 'URI', True);
+  ExpectUri('https://user:pw@example.com:8080/p/a/t/h?q=1' || AMPERSAND || 'r=2#frag', 'URI', True);
+  ExpectUri('http://example.com/a%20b', 'URI', True);
+  ExpectUri('http://example.com?x', 'URI', True);
+  ExpectUri('http://example.com:/', 'URI', True);
+  ExpectUri('file:///etc/hosts', 'URI', True);
+  ExpectUri('mailto:john.doe@example.com', 'URI', True);
+  ExpectUri('urn:isbn:0451450523', 'URI', True);
+  ExpectUri('a+b-c.d:/x', 'URI', True);
+  ExpectUri('mailto:', 'URI', True);
+  ExpectUri('x:#', 'URI', True);
+  ExpectUri('http://example.com/?a/b?c', 'URI', True);
+end UriValid;
+
+procedure UriIpHosts is
+begin
+  ExpectUri('ftp://192.168.0.1/x', 'URI', True);
+  ExpectUri('http://[2001:db8::1]:80/', 'URI', True);
+  ExpectUri('http://[::1]', 'URI', True);
+  ExpectUri('http://[::ffff:192.0.2.1]/', 'URI', True);
+  ExpectUri('http://[v7.fe80:a]/', 'URI', True);
+  -- not a valid IPv4address, so it is read as a reg-name
+  ExpectUri('http://256.1.1.1/', 'URI', True);
+  ExpectUri('http://[::g]/', 'URI', False);
+  ExpectUri('http://[1:2:3:4:5:6:7]/', 'URI', False);
+  ExpectUri('http://[::1/', 'URI', False);
+  ExpectUri('http://[v.x]/', 'URI', False);
+end UriIpHosts;
+
+procedure UriInvalid is
+begin
+  ExpectUri(null, 'URI', False);
+  ExpectUri('//example.com', 'URI', False);
+  ExpectUri('/a/b', 'URI', False);
+  ExpectUri('1http://example.com', 'URI', False);
+  ExpectUri(':foo', 'URI', False);
+  ExpectUri('http://exa mple.com', 'URI', False);
+  ExpectUri('http://example.com/a b', 'URI', False);
+  ExpectUri('http://example.com/%zz', 'URI', False);
+  ExpectUri('http://example.com/%2', 'URI', False);
+  ExpectUri('http://example.com:80a/', 'URI', False);
+  ExpectUri('http://example.com#a#b', 'URI', False);
+  ExpectUri('http://[::1]x', 'URI', False);
+  ExpectUri('http://exa<mple.com', 'URI', False);
+end UriInvalid;
+
+procedure UriReference is
+begin
+  ExpectUri('http://example.com/a', 'URI-reference', True);
+  ExpectUri('//example.com/p', 'URI-reference', True);
+  ExpectUri('/a/b', 'URI-reference', True);
+  ExpectUri('a/b', 'URI-reference', True);
+  ExpectUri('../x?y#z', 'URI-reference', True);
+  ExpectUri('?q', 'URI-reference', True);
+  ExpectUri('#f', 'URI-reference', True);
+  ExpectUri('', 'URI-reference', True);
+  ExpectUri('a:b', 'URI-reference', True);
+  ExpectUri('http://exa mple.com', 'URI-reference', False);
+  ExpectUri('#a#b', 'URI-reference', False);
+end UriReference;
+
+procedure UriStartRules is
+begin
+  -- the first segment of a relative path may not contain a colon
+  ExpectUri('a:b/c', 'relative-ref', False);
+  ExpectUri('./a:b', 'relative-ref', True);
+  ExpectUri('/a:b', 'relative-ref', True);
+  ExpectUri('//example.com', 'relative-ref', True);
+  -- absolute-URI has no fragment
+  ExpectUri('http://example.com/x?y', 'absolute-URI', True);
+  ExpectUri('http://example.com/x?y#f', 'absolute-URI', False);
+  ExpectUri('/x', 'absolute-URI', False);
+end UriStartRules;
+
+procedure UriParseTree is
+  vScheme    varchar2(4000);
+  vUserinfo  varchar2(4000);
+  vHost      varchar2(4000);
+  vPort      varchar2(4000);
+  vPath      varchar2(4000);
+  vQuery     varchar2(4000);
+  vFragment  varchar2(4000);
+begin
+  select max(case t.RULE_NAME when 'scheme' then t.TEXT end)
+       , max(case t.RULE_NAME when 'userinfo' then t.TEXT end)
+       , max(case t.RULE_NAME when 'host' then t.TEXT end)
+       , max(case t.RULE_NAME when 'port' then t.TEXT end)
+       , max(case t.RULE_NAME when 'path-abempty' then t.TEXT end)
+       , max(case t.RULE_NAME when 'query' then t.TEXT end)
+       , max(case t.RULE_NAME when 'fragment' then t.TEXT end)
+  into vScheme, vUserinfo, vHost, vPort, vPath, vQuery, vFragment
+  from table(P_ABNF_Engine.ParseTree(P_ABNF_Network.GetUriRuleSet, 'URI', 'https://jo@example.com:8080/a/b?q=1#top')) t;
+  ut.expect(vScheme).to_equal('https');
+  ut.expect(vUserinfo).to_equal('jo');
+  ut.expect(vHost).to_equal('example.com');
+  ut.expect(vPort).to_equal('8080');
+  ut.expect(vPath).to_equal('/a/b');
+  ut.expect(vQuery).to_equal('q=1');
+  ut.expect(vFragment).to_equal('top');
+end UriParseTree;
+
+procedure UriExplains is
+begin
+  ut.expect(P_ABNF_Engine.ExplainMismatch(P_ABNF_Network.GetUriRuleSet, 'URI', 'http://example.com/a')).to_be_null();
+  ut.expect(P_ABNF_Engine.ExplainMismatch(P_ABNF_Network.GetUriRuleSet, 'URI', 'http://exa mple.com'))
+    .to_be_like('Line 1, column 11: unexpected input " "%');
+end UriExplains;
 
 end P_UT_ABNF_Network;
 /

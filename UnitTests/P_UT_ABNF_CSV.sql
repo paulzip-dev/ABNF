@@ -407,7 +407,8 @@ begin
 end CrLfSplitAcrossChunks;
 
 procedure LargeClob is
-  vCsv     clob := RepeatedClob('7,"a, b' || CRLF || 'c",z' || CRLF, 2000);
+  -- 155 characters per record, so 220 records are over 32767 characters without needing thousands of records
+  vCsv     clob := RepeatedClob('7,"a, b' || CRLF || 'c' || rpad('x', 140, 'x') || '",z' || CRLF, 220);
   vFields  integer;
   vRecords integer;
 begin
@@ -417,8 +418,8 @@ begin
   select count(*), max(f.RECORD_NO)
   into vFields, vRecords
   from table(P_ABNF_CSV.ParseCsv(vCsv, 'N')) f;
-  ut.expect(vFields).to_equal(6000);
-  ut.expect(vRecords).to_equal(2000);
+  ut.expect(vFields).to_equal(660);
+  ut.expect(vRecords).to_equal(220);
 
   dbms_lob.freetemporary(vCsv);
 end LargeClob;

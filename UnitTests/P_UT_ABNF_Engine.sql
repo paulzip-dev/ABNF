@@ -159,6 +159,9 @@ procedure GenerateEscaping;
 --%throws(-20110)
 procedure GenerateInvalidGrammarRaises;
 
+--%test(Code can be generated from a rule set)
+procedure GenerateFromRules;
+
 ------------------------------------------------------------------------------
 -- ValidateInput / ExplainMismatch
 ------------------------------------------------------------------------------
@@ -833,6 +836,17 @@ procedure GenerateInvalidGrammarRaises is
 begin
   vCode := P_ABNF_Engine.GeneratePLSQLFromABNF('r = (');
 end GenerateInvalidGrammarRaises;
+
+procedure GenerateFromRules is
+  vGrammar varchar2(1000) := 'list = number *("," list)' || NL || 'number = 1*DIGIT' || NL;
+  vCode    clob := P_ABNF_Engine.GeneratePLSQLFromRules(P_ABNF_Engine.ParseGrammar(vGrammar));
+begin
+  ut.expect(vCode).to_be_like('%function GetRuleSet return TY_ABNF_RuleSet%');
+  ut.expect(RunGenerated(vCode, 'list', '1,22,3')).to_equal(1);
+  ut.expect(RunGenerated(vCode, 'list', '1,,2')).to_equal(0);
+  ut.expect(DBMS_LOB.GETLENGTH(P_ABNF_Engine.GeneratePLSQLFromRules(null))).to_equal(0);
+  ut.expect(DBMS_LOB.GETLENGTH(P_ABNF_Engine.GeneratePLSQLFromRules(TY_ABNF_RuleSet()))).to_equal(0);
+end GenerateFromRules;
 
 ------------------------------------------------------------------------------
 -- ValidateInput / ExplainMismatch

@@ -615,7 +615,7 @@ function ParseCsv(
            pCsv       clob
          , pHasHeader varchar2 default 'Y'
          ) return TY_ABNF_CsvFieldList pipelined is
-  vHasHeader varchar2(1) := upper(nvl(pHasHeader, 'Y'));
+  vHasHeader varchar2(4000) := upper(nvl(pHasHeader, 'Y'));
   vReader    TReader;
   vRecord    varchar2(32767);
   vStartPos  integer;
