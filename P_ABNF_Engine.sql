@@ -1,3 +1,13 @@
+--------------------------------------------------------------------------------
+-- Augmented Backus Naur Form Engine Package and Utilities
+-- Copyright (c) 2026 Paul Scott
+--
+-- Core of the ABNF implementation (RFC 5234, RFC 7405): the RFC 5234 core rules, ParseGrammar (ABNF text to rule set),
+-- ValidateInput / ExplainMismatch (match input and say why it fails), Tokenise / ParseTree (pipelined breakdown of
+-- input) and GeneratePLSQLFromABNF / GeneratePLSQLFromRules (rule set to PL/SQL source, so the grammar need not be
+-- re-parsed on every call). Works on the TY_ABNF_* types in ABNF_Types.sql; P_ABNF_Network and P_ABNF_CSV build on it.
+--------------------------------------------------------------------------------
+
 create or replace package P_ABNF_Engine is
 
 ------------------------------------------------------------------------------
@@ -1806,3 +1816,4 @@ end ParseTree;
 
 end P_ABNF_Engine;
 /
+

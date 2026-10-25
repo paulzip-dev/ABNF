@@ -1,12 +1,15 @@
 --------------------------------------------------------------------------------
 -- Package Specification: P_ABNF_CSV
 --
+-- Copyright (c) 2026 Paul Scott
+--
 -- CSV (RFC 4180) on top of P_ABNF_Engine. The grammar is held as a rule set (see GetRuleSet in the body), so
 -- changing what counts as valid CSV means changing the grammar, not this package.
 -- Records may end with CRLF, LF or CR (RFC 4180 itself only allows CRLF); the three may be mixed in one file.
 --
 -- The grammar must define these rules (as RFC 4180 does): file, header, record, name, field, escaped.
 --------------------------------------------------------------------------------
+
 create or replace
 package P_ABNF_CSV is
 
@@ -62,9 +65,6 @@ function NormaliseLineEndings(pCsv clob) return clob;
 end P_ABNF_CSV;
 /
 
---------------------------------------------------------------------------------
--- Package Body: P_ABNF_CSV
---------------------------------------------------------------------------------
 create or replace
 package body P_ABNF_CSV is
 

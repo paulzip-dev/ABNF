@@ -1,3 +1,14 @@
+--------------------------------------------------------------------------------
+-- Augmented Backus Naur Form Object Types
+-- Copyright (c) 2026 Paul Scott
+--
+-- The object types behind P_ABNF_Engine. A grammar is a tree of TY_ABNF_Node subtypes (Literal, Range, Sequence,
+-- Alternative, Repetition, RuleRef, Prose), each with a MatchInput method. Named rules are held in a TY_ABNF_RuleSet,
+-- matching state in TY_ABNF_Context / TY_ABNF_RuleContext, and TY_ABNF_Token / ParseNode / CsvField (+ list types) are
+-- the rows returned by Tokenise, ParseTree and ParseCsv. The block below drops every type first, in dependency order,
+-- so installing this script invalidates the packages: rerun the whole build.
+--------------------------------------------------------------------------------
+
 declare
   procedure ExecDDL(pDDL varchar2) is
   begin

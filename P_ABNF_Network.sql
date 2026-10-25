@@ -1,5 +1,11 @@
 --------------------------------------------------------------------------------
 -- Package Specification: P_ABNF_Network
+--
+-- Copyright (c) 2026 Paul Scott
+--
+-- Ready-made ABNF grammars for network identifiers, built on P_ABNF_Engine: IPv4 octet and address, IPv6 address
+-- (RFC 3986 / 4291), email addr-spec (RFC 5322) and URI (RFC 3986). Each is available as a hand-built node tree
+-- (Get*Rule, used by the Validate* functions) and, for ParseTree / Tokenise, as a named rule set (Get*RuleSet).
 --------------------------------------------------------------------------------
 create or replace
 package P_ABNF_Network is
